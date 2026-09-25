@@ -7,7 +7,9 @@ FastAPI customer registration backed by PostgreSQL, SQLAlchemy 2, and Alembic. T
 - `POST /api/auth/customer/register` validates name, email, password, and confirmation.
 - Email addresses are normalized to lowercase and protected by a database unique index.
 - Passwords are hashed with Argon2; plaintext passwords and hashes are never returned by the API.
-- New records use the shared `users` table with `role=CUSTOMER`, `status=ACTIVE`, and `is_active=true`.
+- New customer records use the shared `users` table and remain inactive until the email confirmation code is verified.
+- Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, and optionally `SMTP_USE_TLS` in the backend environment to deliver confirmation codes. Codes expire after 10 minutes.
+- Apply database changes with `venv/bin/alembic upgrade head` from `Backend/`.
 - CORS accepts the configured frontend origin with credentials enabled.
 - Alembic owns schema changes; the app does not call `Base.metadata.create_all()`.
 
