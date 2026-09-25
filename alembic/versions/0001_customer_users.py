@@ -19,7 +19,13 @@ def upgrade() -> None:
     )
     op.create_table(
         "users",
-        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column(
+    "id",
+    postgresql.UUID(as_uuid=True),
+    primary_key=True,
+    nullable=False,
+    default=uuid.uuid4,
+),
         sa.Column("name", sa.String(length=120), nullable=False),
         sa.Column("email", sa.String(length=320), nullable=False),
         sa.Column("password_hash", sa.String(length=255), nullable=False),

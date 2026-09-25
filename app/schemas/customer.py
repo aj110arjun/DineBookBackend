@@ -1,3 +1,5 @@
+import uuid
+
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.models.user import AccountStatus, UserRole
@@ -32,7 +34,7 @@ class CustomerRegisterRequest(BaseModel):
 class CustomerResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
+    id: uuid.UUID
     name: str
     email: EmailStr
     role: UserRole
