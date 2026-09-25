@@ -5,9 +5,14 @@ FastAPI customer registration backed by PostgreSQL, SQLAlchemy 2, and Alembic. T
 ## Included
 
 - `POST /api/auth/customer/register` validates name, email, password, and confirmation.
+- `POST /api/auth/customer/login` checks the customer password and returns a signed JWT in the `dinebook_access_token` HttpOnly cookie.
+- `GET /api/customer/me` validates that cookie and returns the signed-in customer; `POST /api/auth/logout` clears it.
+- The JWT lasts seven days. Unverified customer accounts cannot sign in.
 - Email addresses are normalized to lowercase and protected by a database unique index.
 - Passwords are hashed with Argon2; plaintext passwords and hashes are never returned by the API.
-- New records use the shared `users` table with `role=CUSTOMER`, `status=ACTIVE`, and `is_active=true`.
+- New customer records use the shared `users` table and remain inactive until the email confirmation code is verified.
+- Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, and optionally `SMTP_USE_TLS` in the backend environment to deliver confirmation codes. Codes expire after 10 minutes.
+- Apply database changes with `venv/bin/alembic upgrade head` from `Backend/`.
 - CORS accepts the configured frontend origin with credentials enabled.
 - Alembic owns schema changes; the app does not call `Base.metadata.create_all()`.
 
@@ -73,6 +78,10 @@ A successful registration returns `201 Created` with the new customer's public p
 | --- | --- | --- |
 | `DATABASE_URL` | PostgreSQL SQLAlchemy URL (`postgresql+psycopg://...`) | Local `dinebook` role/database URL |
 | `FRONTEND_URL` | Allowed credentialed CORS origin | `http://localhost:5173` |
+| `JWT_SECRET_KEY` | Secret used to sign and verify session JWTs | Development-only fallback; set a private random secret in production |
+| `AUTH_COOKIE_SECURE` | Restricts the session cookie to HTTPS | `false` locally; set `true` in production |
+| `JWT_EXPIRE_MINUTES` | Session lifetime in minutes | `10080` (seven days) |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, `SMTP_USE_TLS` | Email confirmation delivery settings | No email delivery until configured |
 
 ## Structure
 
