@@ -3,7 +3,17 @@ import uuid
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,6 +29,7 @@ class RestaurantStatus(str, enum.Enum):
 
 class Restaurant(Base):
     __tablename__ = "restaurants"
+
     __table_args__ = (
         UniqueConstraint("manager_id", name="uq_restaurants_manager_id"),
         Index("ix_restaurants_status", "status"),
@@ -46,6 +57,11 @@ class Restaurant(Base):
         nullable=True,
     )
 
+    cuisine_type: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+
     email: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
@@ -64,6 +80,26 @@ class Restaurant(Base):
     city: Mapped[str] = mapped_column(
         String(100),
         nullable=False,
+    )
+
+    state: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+
+    pin_code: Mapped[str | None] = mapped_column(
+        String(10),
+        nullable=True,
+    )
+
+    capacity: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    tables: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
     )
 
     latitude: Mapped[float | None] = mapped_column(
