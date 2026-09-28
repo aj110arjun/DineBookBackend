@@ -10,7 +10,7 @@ from app.routers import (
     customer_auth_router,
     manager_auth_router,
 )
-from app.routers.customer_auth import session_router
+
 
 app = FastAPI(title="DineBook API", version="0.1.0")
 
