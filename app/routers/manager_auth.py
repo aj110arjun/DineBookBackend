@@ -1,6 +1,5 @@
 import uuid
 from datetime import time
-from pathlib import Path
 
 from fastapi import (
     APIRouter,
@@ -17,6 +16,7 @@ from pydantic import EmailStr
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session
 
+from app.core.cloudinary import delete_file, upload_file
 from app.core.config import settings
 from app.core.security import (
     create_access_token,
@@ -54,60 +54,6 @@ ALLOWED_IMAGE_TYPES = {
     "image/png",
     "image/jpeg",
 }
-
-UPLOAD_ROOT = Path("uploads") / "restaurants"
-
-
-def save_upload_file(
-    upload: UploadFile,
-    destination: Path,
-    max_size: int,
-    allowed_types: set[str],
-) -> str:
-    if not upload.filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Uploaded file must have a filename.",
-        )
-
-    if upload.content_type not in allowed_types:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"Unsupported file type for '{upload.filename}'. "
-                "Allowed types are PDF, PNG, and JPEG."
-            ),
-        )
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-
-    total_size = 0
-
-    try:
-        with destination.open("wb") as output:
-            while True:
-                chunk = upload.file.read(1024 * 1024)
-
-                if not chunk:
-                    break
-
-                total_size += len(chunk)
-
-                if total_size > max_size:
-                    raise HTTPException(
-                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=f"File '{upload.filename}' is too large.",
-                    )
-
-                output.write(chunk)
-
-    except Exception:
-        if destination.exists():
-            destination.unlink()
-
-        raise
-
-    return str(destination)
 
 
 def current_manager(
@@ -154,7 +100,7 @@ def current_manager(
     response_model=dict,
     status_code=status.HTTP_201_CREATED,
 )
-def register_manager(
+async def register_manager(
     name: str = Form(...),
     email: EmailStr = Form(...),
     password: str = Form(...),
@@ -309,21 +255,32 @@ def register_manager(
     db.add(restaurant)
     db.flush()
 
-    uploaded_files: list[Path] = []
+    # Keep track of uploaded Cloudinary files so they can be
+    # deleted if the database transaction fails.
+    uploaded_files: list[tuple[str, str]] = []
 
     try:
         documents = [
             (
                 fssai_license,
                 RestaurantDocumentType.FSSAI_LICENSE,
+                "raw",
+                MAX_DOCUMENT_SIZE,
+                ALLOWED_DOCUMENT_TYPES,
             ),
             (
                 business_registration,
                 RestaurantDocumentType.BUSINESS_REGISTRATION,
+                "raw",
+                MAX_DOCUMENT_SIZE,
+                ALLOWED_DOCUMENT_TYPES,
             ),
             (
                 owner_identity,
                 RestaurantDocumentType.OWNER_IDENTITY,
+                "raw",
+                MAX_DOCUMENT_SIZE,
+                ALLOWED_DOCUMENT_TYPES,
             ),
         ]
 
@@ -332,6 +289,9 @@ def register_manager(
                 (
                     gst_certificate,
                     RestaurantDocumentType.GST_CERTIFICATE,
+                    "raw",
+                    MAX_DOCUMENT_SIZE,
+                    ALLOWED_DOCUMENT_TYPES,
                 )
             )
 
@@ -340,70 +300,122 @@ def register_manager(
                 (
                     branding_images,
                     RestaurantDocumentType.BRANDING_IMAGE,
+                    "image",
+                    MAX_DOCUMENT_SIZE,
+                    ALLOWED_DOCUMENT_TYPES,
                 )
             )
 
-        for upload, document_type in documents:
-            extension = Path(upload.filename or "").suffix.lower()
+        # Upload required/optional documents to Cloudinary.
+        for (
+            upload,
+            document_type,
+            resource_type,
+            max_size,
+            allowed_types,
+        ) in documents:
+            if not upload.filename:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Uploaded file must have a filename.",
+                )
 
-            generated_name = (
-                f"{uuid.uuid4()}{extension}"
+            if upload.content_type not in allowed_types:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Unsupported file type for '{upload.filename}'. "
+                        "Allowed types are PDF, PNG, and JPEG."
+                    ),
+                )
+
+            file_content = await upload.read()
+
+            if len(file_content) > max_size:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File '{upload.filename}' is too large.",
+                )
+
+            result = upload_file(
+                file=file_content,
+                folder=(
+                    f"dinebook/restaurants/"
+                    f"{restaurant.id}/documents"
+                ),
+                resource_type=resource_type,
             )
 
-            file_path = (
-                UPLOAD_ROOT
-                / str(restaurant.id)
-                / generated_name
-            )
+            secure_url = result.get("secure_url")
+            public_id = result.get("public_id")
 
-            save_upload_file(
-                upload=upload,
-                destination=file_path,
-                max_size=MAX_DOCUMENT_SIZE,
-                allowed_types=ALLOWED_DOCUMENT_TYPES,
-            )
+            if not secure_url or not public_id:
+                raise RuntimeError(
+                    f"Cloudinary upload failed for '{upload.filename}'."
+                )
 
-            uploaded_files.append(file_path)
+            uploaded_files.append(
+                (public_id, resource_type)
+            )
 
             db.add(
                 RestaurantDocument(
                     restaurant_id=restaurant.id,
                     document_type=document_type,
-                    file_name=upload.filename or generated_name,
-                    file_path=str(file_path),
+                    file_name=upload.filename,
+                    file_path=secure_url,
                 )
             )
 
+        # Upload interior media separately.
         if interior_media is not None:
-            extension = Path(
-                interior_media.filename or ""
-            ).suffix.lower()
+            if not interior_media.filename:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Interior media must have a filename.",
+                )
 
-            generated_name = (
-                f"{uuid.uuid4()}{extension}"
+            if interior_media.content_type not in ALLOWED_IMAGE_TYPES:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Interior media must be a PNG or JPEG image.",
+                )
+
+            file_content = await interior_media.read()
+
+            if len(file_content) > MAX_IMAGE_SIZE:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="Interior media is too large.",
+                )
+
+            result = upload_file(
+                file=file_content,
+                folder=(
+                    f"dinebook/restaurants/"
+                    f"{restaurant.id}/interior"
+                ),
+                resource_type="image",
             )
 
-            file_path = (
-                UPLOAD_ROOT
-                / str(restaurant.id)
-                / generated_name
-            )
+            secure_url = result.get("secure_url")
+            public_id = result.get("public_id")
 
-            save_upload_file(
-                upload=interior_media,
-                destination=file_path,
-                max_size=MAX_IMAGE_SIZE,
-                allowed_types=ALLOWED_IMAGE_TYPES,
-            )
+            if not secure_url or not public_id:
+                raise RuntimeError(
+                    "Cloudinary interior image upload failed."
+                )
 
-            uploaded_files.append(file_path)
+            uploaded_files.append(
+                (public_id, "image")
+            )
 
             db.add(
                 RestaurantDocument(
                     restaurant_id=restaurant.id,
                     document_type=RestaurantDocumentType.BRANDING_IMAGE,
-                    file_name=interior_media.filename or generated_name,
-                    file_path=str(file_path),
+                    file_name=interior_media.filename,
+                    file_path=secure_url,
                 )
             )
 
@@ -480,30 +492,45 @@ def register_manager(
     except HTTPException:
         db.rollback()
 
-        for file_path in uploaded_files:
-            if file_path.exists():
-                file_path.unlink()
+        for public_id, resource_type in uploaded_files:
+            try:
+                delete_file(
+                    public_id=public_id,
+                    resource_type=resource_type,
+                )
+            except Exception:
+                pass
 
         raise
 
     except (ValueError, TypeError) as exc:
         db.rollback()
 
-        for file_path in uploaded_files:
-            if file_path.exists():
-                file_path.unlink()
+        for public_id, resource_type in uploaded_files:
+            try:
+                delete_file(
+                    public_id=public_id,
+                    resource_type=resource_type,
+                )
+            except Exception:
+                pass
 
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid manager application data.",
+            detail=f"Invalid manager application data: {str(exc)}",
         ) from exc
 
     except Exception as exc:
         db.rollback()
 
-        for file_path in uploaded_files:
-            if file_path.exists():
-                file_path.unlink()
+        for public_id, resource_type in uploaded_files:
+            try:
+                delete_file(
+                    public_id=public_id,
+                    resource_type=resource_type,
+                )
+            except Exception:
+                pass
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
