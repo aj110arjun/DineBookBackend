@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.models.user import AccountStatus, User, UserRole
-from app.models.restaurant import Restaurant
+from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.restaurant_document import RestaurantDocument
 from app.models.restaurant_hours import RestaurantHours
 from app.routers.admin_auth import current_admin
@@ -22,13 +22,14 @@ def get_manager_requests(
     admin: User = Depends(current_admin),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    managers = (
-        db.query(User)
+    requests = (
+        db.query(User, Restaurant)
+        .join(Restaurant, Restaurant.manager_id == User.id)
         .filter(
             User.role == UserRole.MANAGER,
-            User.status == AccountStatus.PENDING,
+            Restaurant.status == RestaurantStatus.PENDING,
         )
-        .order_by(User.created_at.asc())
+        .order_by(Restaurant.created_at.asc())
         .all()
     )
 
@@ -40,8 +41,16 @@ def get_manager_requests(
             "role": manager.role.value,
             "status": manager.status.value,
             "created_at": manager.created_at,
+            "restaurant": {
+                "id": str(restaurant.id),
+                "name": restaurant.name,
+                "cuisine_type": restaurant.cuisine_type,
+                "city": restaurant.city,
+                "state": restaurant.state,
+                "status": restaurant.status.value,
+            },
         }
-        for manager in managers
+        for manager, restaurant in requests
     ]
 
 @router.get("/requests/{manager_id}", response_model=dict)
@@ -170,14 +179,21 @@ def approve_manager(
             detail="Manager account not found.",
         )
 
-    if manager.status != AccountStatus.PENDING:
+    restaurant = db.query(Restaurant).filter(Restaurant.manager_id == manager.id).first()
+    if restaurant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Restaurant application not found.",
+        )
+    if restaurant.status != RestaurantStatus.PENDING:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Manager account is already {manager.status.value.lower()}.",
+            detail=f"Restaurant application is already {restaurant.status.value.lower()}.",
         )
 
     manager.status = AccountStatus.ACTIVE
     manager.is_active = True
+    restaurant.status = RestaurantStatus.APPROVED
 
     db.commit()
     db.refresh(manager)
@@ -190,6 +206,11 @@ def approve_manager(
             "email": manager.email,
             "role": manager.role.value,
             "status": manager.status.value,
+        },
+        "restaurant": {
+            "id": str(restaurant.id),
+            "name": restaurant.name,
+            "status": restaurant.status.value,
         },
     }
 
@@ -215,14 +236,21 @@ def reject_manager(
             detail="Manager account not found.",
         )
 
-    if manager.status != AccountStatus.PENDING:
+    restaurant = db.query(Restaurant).filter(Restaurant.manager_id == manager.id).first()
+    if restaurant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Restaurant application not found.",
+        )
+    if restaurant.status != RestaurantStatus.PENDING:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Manager account is already {manager.status.value.lower()}.",
+            detail=f"Restaurant application is already {restaurant.status.value.lower()}.",
         )
 
     manager.status = AccountStatus.REJECTED
     manager.is_active = False
+    restaurant.status = RestaurantStatus.REJECTED
 
     db.commit()
     db.refresh(manager)
@@ -235,5 +263,10 @@ def reject_manager(
             "email": manager.email,
             "role": manager.role.value,
             "status": manager.status.value,
+        },
+        "restaurant": {
+            "id": str(restaurant.id),
+            "name": restaurant.name,
+            "status": restaurant.status.value,
         },
     }
