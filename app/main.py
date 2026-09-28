@@ -5,9 +5,11 @@ from app.core.config import settings
 from app.routers import (
     admin_auth_router,
     admin_managers_router,
+    admin_restaurants_router,
     chef_auth_router,
     chef_session_router,
     customer_auth_router,
+    customer_restaurants_router,
     manager_auth_router,
     manager_staff_router,
 )
@@ -25,6 +27,7 @@ app.add_middleware(
 )
 
 app.include_router(customer_auth_router)
+app.include_router(customer_restaurants_router)
 app.include_router(session_router)
 app.include_router(admin_auth_router)
 app.include_router(manager_auth_router)
@@ -32,6 +35,7 @@ app.include_router(manager_staff_router)
 app.include_router(chef_auth_router)
 app.include_router(chef_session_router)
 app.include_router(admin_managers_router)
+app.include_router(admin_restaurants_router)
 
 
 @app.get("/api/health", tags=["health"])
