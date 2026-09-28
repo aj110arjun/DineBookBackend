@@ -13,6 +13,7 @@ depends_on = None
 def upgrade() -> None:
     op.add_column("users", sa.Column("manager_id", postgresql.UUID(as_uuid=True), nullable=True))
     op.create_foreign_key("fk_users_manager_id_users", "users", "users", ["manager_id"], ["id"], ondelete="CASCADE")
+
     op.create_index("ix_users_manager_id", "users", ["manager_id"])
 
 

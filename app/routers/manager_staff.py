@@ -28,7 +28,9 @@ class ChefCreateRequest(BaseModel):
 
 
 def chef_dict(chef: User) -> dict:
+  
     return {"id": str(chef.id), "name": chef.name, "email": chef.email, "role": chef.role.value, "status": chef.status.value, "is_active": chef.is_active}
+
 
 
 @router.get("")
@@ -50,6 +52,7 @@ def create_chef(payload: ChefCreateRequest, manager: User = Depends(current_mana
         status=AccountStatus.ACTIVE,
         is_active=True,
         email_verified=True,
+
         manager_id=manager.id,
     )
     db.add(chef)
