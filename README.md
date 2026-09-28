@@ -6,6 +6,7 @@ FastAPI customer registration backed by PostgreSQL, SQLAlchemy 2, and Alembic. T
 
 - `POST /api/auth/customer/register` validates name, email, password, and confirmation.
 - `POST /api/auth/customer/login` checks the customer password and returns a signed JWT in the `dinebook_access_token` HttpOnly cookie.
+- `POST /api/auth/chef/login` checks an active chef account and returns the same signed HttpOnly session cookie; `GET /api/chef/me` returns the authenticated chef profile and `POST /api/auth/chef/logout` clears the session.
 - `GET /api/customer/me` validates that cookie and returns the signed-in customer; `POST /api/auth/logout` clears it.
 - The JWT lasts seven days. Unverified customer accounts cannot sign in.
 - Email addresses are normalized to lowercase and protected by a database unique index.
