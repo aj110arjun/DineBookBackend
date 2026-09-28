@@ -10,8 +10,21 @@ class ManagerRegisterRequest(BaseModel):
     # Restaurant details
     restaurant_name: str = Field(min_length=2, max_length=255)
     restaurant_description: str | None = None
-    restaurant_phone: str | None = Field(default=None, max_length=20)
-    restaurant_address: str = Field(min_length=2)
-    restaurant_city: str = Field(min_length=2, max_length=100)
+    cuisine_type: str = Field(min_length=2, max_length=100)
+
+    restaurant_contact: str = Field(min_length=6, max_length=20)
+    restaurant_email: EmailStr
+
+    # Address
+    address: str = Field(min_length=2, max_length=500)
+    city: str = Field(min_length=2, max_length=100)
+    state: str = Field(min_length=2, max_length=100)
+    pin_code: str = Field(min_length=3, max_length=20)
+
+    # Restaurant capacity
+    capacity: int = Field(gt=0)
+    tables: int = Field(gt=0)
+
+    # Location
     latitude: float | None = None
     longitude: float | None = None
