@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.security import create_access_token, decode_access_token, verify_secret
 from app.db.database import get_db
+from app.models.restaurant import Restaurant
 from app.models.user import AccountStatus, User, UserRole
 
 
@@ -52,13 +53,17 @@ def current_chef(
     return chef
 
 
-def chef_profile(chef: User) -> dict[str, str]:
+def chef_profile(chef: User, db: Session | None = None) -> dict:
+    restaurant = None
+    if db is not None and chef.manager_id is not None:
+        restaurant = db.query(Restaurant.name).filter(Restaurant.manager_id == chef.manager_id).scalar()
     return {
         "id": str(chef.id),
         "name": chef.name,
         "email": chef.email,
         "role": chef.role.value,
         "status": chef.status.value,
+        "restaurant_name": restaurant,
     }
 
 
@@ -110,12 +115,14 @@ def login_chef(
         samesite="lax",
         path="/",
     )
-    return {"message": "Chef signed in successfully.", "user": chef_profile(chef)}
+    return {"message": "Chef signed in successfully.", "user": chef_profile(chef, db)}
 
 
 @session_router.get("/api/chef/me", response_model=dict)
-def get_current_chef(chef: User = Depends(current_chef)) -> dict:
-    return chef_profile(chef)
+def get_current_chef(
+    chef: User = Depends(current_chef), db: Session = Depends(get_db)
+) -> dict:
+    return chef_profile(chef, db)
 
 
 @router.post("/logout", response_model=dict)
