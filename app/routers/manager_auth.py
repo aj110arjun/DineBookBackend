@@ -1,5 +1,8 @@
 import uuid
-from datetime import time
+import secrets
+import smtplib
+from datetime import datetime, time, timedelta, timezone
+from email.message import EmailMessage
 
 from fastapi import (
     APIRouter,
@@ -12,7 +15,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from pydantic import EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session
 
@@ -32,12 +35,83 @@ from app.models.restaurant_document import (
 )
 from app.models.restaurant_hours import RestaurantHours
 from app.models.user import AccountStatus, User, UserRole
+from app.models.user import EmailVerificationCode
 
 
 router = APIRouter(
     prefix="/api/auth/manager",
     tags=["manager authentication"],
 )
+
+
+class ManagerEmailRequest(BaseModel):
+    email: EmailStr
+
+
+class ManagerEmailCodeRequest(ManagerEmailRequest):
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+def send_manager_verification_email(email: str, code: str) -> None:
+    if not settings.smtp_host or not settings.smtp_from_email:
+        raise HTTPException(status_code=503, detail="Email delivery is not configured. Please contact support.")
+    message = EmailMessage()
+    message["Subject"] = "Your DineBook confirmation code"
+    message["From"] = settings.smtp_from_email
+    message["To"] = email
+    message.set_content(f"Your DineBook confirmation code is {code}. It expires in 10 minutes.")
+    try:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as smtp:
+            if settings.smtp_use_tls:
+                smtp.starttls()
+            if settings.smtp_username:
+                smtp.login(settings.smtp_username, settings.smtp_password or "")
+            smtp.send_message(message)
+    except (OSError, smtplib.SMTPException) as exc:
+        raise HTTPException(status_code=503, detail="We couldn’t send the confirmation email. Please try again.") from exc
+
+
+def issue_manager_verification_code(db: Session, email: str) -> None:
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    record = db.query(EmailVerificationCode).filter(EmailVerificationCode.email == email).first()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    if record is None:
+        record = EmailVerificationCode(email=email, code_hash=hash_password(code), expires_at=expires_at)
+        db.add(record)
+    else:
+        record.code_hash = hash_password(code)
+        record.expires_at = expires_at
+    db.flush()
+    send_manager_verification_email(email, code)
+
+
+@router.post("/send-verification")
+def send_manager_verification(payload: ManagerEmailRequest, db: Session = Depends(get_db)) -> dict[str, str]:
+    email = str(payload.email).strip().lower()
+    if db.query(User.id).filter(User.email == email).first():
+        raise HTTPException(status_code=409, detail="An account with this email already exists. Sign in or use a different email.")
+    try:
+        issue_manager_verification_code(db, email)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    return {"message": "A confirmation code has been sent."}
+
+
+@router.post("/verify-email")
+def verify_manager_email(payload: ManagerEmailCodeRequest, db: Session = Depends(get_db)) -> dict[str, str]:
+    email = str(payload.email).strip().lower()
+    code = payload.code
+    verification = db.query(EmailVerificationCode).filter(EmailVerificationCode.email == email).first()
+    now = datetime.now(timezone.utc)
+    if verification is None or verification.expires_at.replace(tzinfo=timezone.utc) <= now:
+        raise HTTPException(status_code=400, detail="That confirmation code has expired. Request a new code.")
+    if not verify_secret(code, verification.code_hash):
+        raise HTTPException(status_code=400, detail="That confirmation code is incorrect.")
+    verification.code_hash = hash_password("manager-email-verified")
+    db.commit()
+    return {"message": "Email address confirmed."}
 
 ACCESS_COOKIE = "dinebook_access_token"
 
@@ -46,8 +120,6 @@ MAX_IMAGE_SIZE = 10 * 1024 * 1024
 
 ALLOWED_DOCUMENT_TYPES = {
     "application/pdf",
-    "image/png",
-    "image/jpeg",
 }
 
 ALLOWED_IMAGE_TYPES = {
@@ -223,6 +295,17 @@ async def register_manager(
             detail="An account with this email already exists.",
         )
 
+    verification = db.query(EmailVerificationCode).filter(EmailVerificationCode.email == email).first()
+    if (
+        verification is None
+        or verification.expires_at.replace(tzinfo=timezone.utc) <= datetime.now(timezone.utc)
+        or not verify_secret("manager-email-verified", verification.code_hash)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verify your email address before submitting the application.",
+        )
+
     manager = User(
         name=name,
         email=email,
@@ -234,6 +317,7 @@ async def register_manager(
     )
 
     db.add(manager)
+    db.delete(verification)
     db.flush()
 
     restaurant = Restaurant(
@@ -302,7 +386,7 @@ async def register_manager(
                     RestaurantDocumentType.BRANDING_IMAGE,
                     "image",
                     MAX_DOCUMENT_SIZE,
-                    ALLOWED_DOCUMENT_TYPES,
+                    ALLOWED_IMAGE_TYPES,
                 )
             )
 
@@ -321,15 +405,29 @@ async def register_manager(
                 )
 
             if upload.content_type not in allowed_types:
+                allowed_types_label = (
+                    "PNG or JPEG images"
+                    if allowed_types == ALLOWED_IMAGE_TYPES
+                    else "PDF files"
+                )
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
                         f"Unsupported file type for '{upload.filename}'. "
-                        "Allowed types are PDF, PNG, and JPEG."
+                        f"Allowed type: {allowed_types_label}."
                     ),
                 )
 
             file_content = await upload.read()
+
+            if (
+                allowed_types == ALLOWED_DOCUMENT_TYPES
+                and b"%PDF-" not in file_content[:1024]
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"File '{upload.filename}' must be a valid PDF document.",
+                )
 
             if len(file_content) > max_size:
                 raise HTTPException(

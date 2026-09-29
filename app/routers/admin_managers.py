@@ -1,6 +1,11 @@
 import uuid
+import mimetypes
+from pathlib import Path
+from urllib.error import URLError
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -154,6 +159,82 @@ def get_manager_request_details(
             for hour in hours
         ],
     }
+
+
+@router.get("/requests/{manager_id}/documents/{document_id}/preview")
+def preview_manager_document(
+    manager_id: uuid.UUID,
+    document_id: uuid.UUID,
+    admin: User = Depends(current_admin),
+    db: Session = Depends(get_db),
+) -> Response:
+    restaurant = (
+        db.query(Restaurant)
+        .filter(Restaurant.manager_id == manager_id)
+        .first()
+    )
+    if restaurant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Restaurant application not found.",
+        )
+
+    document = (
+        db.query(RestaurantDocument)
+        .filter(
+            RestaurantDocument.id == document_id,
+            RestaurantDocument.restaurant_id == restaurant.id,
+        )
+        .first()
+    )
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Application document not found.",
+        )
+
+    parsed_url = urlparse(document.file_path)
+    cloudinary_host = parsed_url.hostname or ""
+    if (
+        parsed_url.scheme not in {"http", "https"}
+        or not (
+            cloudinary_host == "cloudinary.com"
+            or cloudinary_host.endswith(".cloudinary.com")
+        )
+        or parsed_url.username
+        or parsed_url.password
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Document preview is unavailable.",
+        )
+
+    try:
+        # Cloudinary secure URLs are HTTPS. Normalize older HTTP URLs to avoid
+        # forwarding an insecure request from the admin preview endpoint.
+        preview_url = parsed_url._replace(scheme="https").geturl()
+        with urlopen(preview_url, timeout=20) as upstream:
+            content = upstream.read()
+    except (URLError, TimeoutError, OSError):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unable to load document preview.",
+        )
+
+    filename = Path(document.file_name or "document").name.replace('"', "_")
+    media_type = mimetypes.guess_type(filename)[0]
+    if media_type not in {"application/pdf", "image/png", "image/jpeg"}:
+        media_type = "application/octet-stream"
+
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 @router.patch("/{manager_id}/approve", response_model=dict)
 def approve_manager(
