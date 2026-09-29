@@ -25,10 +25,7 @@ def get_manager_requests(
     requests = (
         db.query(User, Restaurant)
         .join(Restaurant, Restaurant.manager_id == User.id)
-        .filter(
-            User.role == UserRole.MANAGER,
-            Restaurant.status == RestaurantStatus.PENDING,
-        )
+        .filter(User.role == UserRole.MANAGER)
         .order_by(Restaurant.created_at.asc())
         .all()
     )
