@@ -151,7 +151,7 @@ async def register_manager(
     business_registration: UploadFile = File(...),
     gst_certificate: UploadFile | None = File(None),
     owner_identity: UploadFile = File(...),
-    branding_images: UploadFile | None = File(None),
+    branding_images: UploadFile = File(...),
     interior_media: UploadFile | None = File(None),
 
     db: Session = Depends(get_db),
