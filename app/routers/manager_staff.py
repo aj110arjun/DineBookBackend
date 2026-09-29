@@ -1,10 +1,14 @@
 import uuid
+import secrets
+import smtplib
+from email.message import EmailMessage
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.security import hash_password
 from app.db.database import get_db
 from app.models.user import AccountStatus, User, UserRole
@@ -16,7 +20,6 @@ router = APIRouter(prefix="/api/manager/staff", tags=["manager staff"])
 class ChefCreateRequest(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
 
     @field_validator("name")
     @classmethod
@@ -28,8 +31,31 @@ class ChefCreateRequest(BaseModel):
 
 
 def chef_dict(chef: User) -> dict:
-  
     return {"id": str(chef.id), "name": chef.name, "email": chef.email, "role": chef.role.value, "status": chef.status.value, "is_active": chef.is_active}
+
+
+def send_chef_credentials(email: str, name: str, password: str) -> None:
+    if not settings.smtp_host or not settings.smtp_from_email:
+        raise HTTPException(status_code=503, detail="Email delivery is not configured. Please contact support.")
+    message = EmailMessage()
+    message["Subject"] = "Your DineBook chef account"
+    message["From"] = settings.smtp_from_email
+    message["To"] = email
+    message.set_content(
+        f"Hello {name},\n\nYour manager created a DineBook chef account for you.\n"
+        f"Sign in at {settings.frontend_public_url or settings.frontend_url}/chef/login\n\n"
+        f"Email: {email}\nTemporary password: {password}\n\n"
+        "You will be asked to change this password when you first sign in."
+    )
+    try:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as smtp:
+            if settings.smtp_use_tls:
+                smtp.starttls()
+            if settings.smtp_username:
+                smtp.login(settings.smtp_username, settings.smtp_password or "")
+            smtp.send_message(message)
+    except (OSError, smtplib.SMTPException) as exc:
+        raise HTTPException(status_code=503, detail="We couldn’t send the chef’s account email. Please try again.") from exc
 
 
 
@@ -44,14 +70,17 @@ def create_chef(payload: ChefCreateRequest, manager: User = Depends(current_mana
     email = str(payload.email).strip().lower()
     if db.query(User.id).filter(User.email == email).first():
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
+    temporary_password = secrets.token_urlsafe(12)
+    send_chef_credentials(email, payload.name, temporary_password)
     chef = User(
         name=payload.name,
         email=email,
-        password_hash=hash_password(payload.password),
+        password_hash=hash_password(temporary_password),
         role=UserRole.CHEF,
         status=AccountStatus.ACTIVE,
         is_active=True,
         email_verified=True,
+        must_change_password=True,
 
         manager_id=manager.id,
     )

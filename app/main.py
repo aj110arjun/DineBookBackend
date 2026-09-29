@@ -20,7 +20,14 @@ app = FastAPI(title="DineBook API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_url],
+    allow_origins=[
+    settings.frontend_url,
+    *(
+        [settings.frontend_public_url]
+        if settings.frontend_public_url
+        else []
+    ),
+],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
