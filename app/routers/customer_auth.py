@@ -1,6 +1,9 @@
 import uuid
 import secrets
 import smtplib
+import json
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
@@ -18,6 +21,7 @@ from app.schemas.customer import CustomerRegisterRequest, CustomerResponse
 router = APIRouter(prefix="/api/auth/customer", tags=["customer authentication"])
 session_router = APIRouter(tags=["customer sessions"])
 ACCESS_COOKIE = "dinebook_access_token"
+GOOGLE_STATE_COOKIE = "dinebook_google_oauth_state"
 
 
 class CustomerLoginRequest(BaseModel):
@@ -104,6 +108,110 @@ def login_customer(payload: CustomerLoginRequest, response: Response, db: Sessio
     token, _ = create_access_token(str(customer.id))
     response.set_cookie(ACCESS_COOKIE, token, max_age=settings.jwt_expire_minutes * 60, httponly=True, secure=settings.auth_cookie_secure, samesite="lax", path="/")
     return customer
+
+
+@router.get("/google/login")
+def google_login():
+    if not settings.google_client_id or not settings.google_client_secret:
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured.")
+    state = secrets.token_urlsafe(32)
+    query = urllib.parse.urlencode({
+        "client_id": settings.google_client_id,
+        "redirect_uri": settings.google_redirect_uri,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "prompt": "select_account",
+    })
+    from fastapi.responses import RedirectResponse
+    redirect = RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{query}", status_code=302)
+    # Attach the CSRF state cookie to the redirect response itself. FastAPI
+    # discards cookies set on an injected Response when a different response
+    # object (RedirectResponse) is returned.
+    redirect.set_cookie(GOOGLE_STATE_COOKIE, state, max_age=600, httponly=True,
+                        secure=settings.auth_cookie_secure, samesite="lax", path="/")
+    return redirect
+
+
+@router.get("/google/callback")
+def google_callback(code: str | None = None, state: str | None = None,
+                    error: str | None = None,
+                    oauth_state: str | None = Cookie(default=None, alias=GOOGLE_STATE_COOKIE),
+                    db: Session = Depends(get_db)):
+    from fastapi.responses import RedirectResponse
+
+    def finish(path: str):
+        target = settings.frontend_url.rstrip("/") + path
+        result = RedirectResponse(target, status_code=302)
+        result.delete_cookie(GOOGLE_STATE_COOKIE, path="/", httponly=True,
+                             secure=settings.auth_cookie_secure, samesite="lax")
+        return result
+
+    if error or not code or not state or not oauth_state or not secrets.compare_digest(state, oauth_state):
+        return finish("/customer/login?google=failed")
+    if not settings.google_client_id or not settings.google_client_secret:
+        return finish("/customer/login?google=unavailable")
+    try:
+        token_request = urllib.request.Request(
+            "https://oauth2.googleapis.com/token",
+            data=urllib.parse.urlencode({
+                "code": code,
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "redirect_uri": settings.google_redirect_uri,
+                "grant_type": "authorization_code",
+            }).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(token_request, timeout=10) as result:
+            access_token = json.loads(result.read()).get("access_token")
+        if not access_token:
+            raise ValueError("Missing Google access token")
+        profile_request = urllib.request.Request(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        with urllib.request.urlopen(profile_request, timeout=10) as result:
+            profile = json.loads(result.read())
+        email = str(profile.get("email", "")).strip().lower()
+        if not email or not profile.get("verified_email"):
+            raise ValueError("Google account email is not verified")
+    except Exception:
+        return finish("/customer/login?google=failed")
+
+    customer = db.query(User).filter(User.email == email).first()
+    if customer is not None:
+        if customer.role != UserRole.CUSTOMER or not customer.is_active:
+            return finish("/customer/login?google=unavailable")
+        customer.email_verified = True
+        if not customer.name and profile.get("name"):
+            customer.name = str(profile["name"])[:120]
+    else:
+        customer = User(
+            name=str(profile.get("name") or email.split("@")[0])[:120],
+            email=email,
+            password_hash=hash_password(secrets.token_urlsafe(32)),
+            role=UserRole.CUSTOMER,
+            status=AccountStatus.ACTIVE,
+            is_active=True,
+            email_verified=True,
+        )
+        db.add(customer)
+    try:
+        db.commit()
+        db.refresh(customer)
+    except IntegrityError:
+        db.rollback()
+        customer = db.query(User).filter(User.email == email, User.role == UserRole.CUSTOMER).first()
+        if customer is None or not customer.is_active:
+            return finish("/customer/login?google=unavailable")
+    token, _ = create_access_token(str(customer.id))
+    result = RedirectResponse(settings.frontend_url.rstrip("/") + "/customer", status_code=302)
+    result.set_cookie(ACCESS_COOKIE, token, max_age=settings.jwt_expire_minutes * 60,
+                      httponly=True, secure=settings.auth_cookie_secure, samesite="lax", path="/")
+    result.delete_cookie(GOOGLE_STATE_COOKIE, path="/", httponly=True,
+                         secure=settings.auth_cookie_secure, samesite="lax")
+    return result
 
 
 @session_router.get("/api/customer/me", response_model=CustomerResponse)
