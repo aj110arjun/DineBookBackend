@@ -5,7 +5,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.security import create_access_token, decode_access_token, verify_secret
+from app.core.security import create_access_token, decode_access_token, hash_password, verify_secret
 from app.db.database import get_db
 from app.models.restaurant import Restaurant
 from app.models.user import AccountStatus, User, UserRole
@@ -19,6 +19,10 @@ ACCESS_COOKIE = "dinebook_access_token"
 class ChefLoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+
+
+class ChefChangePasswordRequest(BaseModel):
+    password: str = Field(min_length=8, max_length=128)
 
 
 def current_chef(
@@ -64,6 +68,7 @@ def chef_profile(chef: User, db: Session | None = None) -> dict:
         "role": chef.role.value,
         "status": chef.status.value,
         "restaurant_name": restaurant,
+        "must_change_password": chef.must_change_password,
     }
 
 
@@ -115,7 +120,34 @@ def login_chef(
         samesite="lax",
         path="/",
     )
-    return {"message": "Chef signed in successfully.", "user": chef_profile(chef, db)}
+    return {
+        "message": "Chef signed in successfully.",
+        "user": chef_profile(chef, db),
+        "must_change_password": chef.must_change_password,
+    }
+
+
+@router.post("/change-password", response_model=dict)
+def change_chef_password(
+    payload: ChefChangePasswordRequest,
+    response: Response,
+    chef: User = Depends(current_chef),
+    db: Session = Depends(get_db),
+) -> dict:
+    chef.password_hash = hash_password(payload.password)
+    chef.must_change_password = False
+    db.commit()
+    token, _ = create_access_token(str(chef.id))
+    response.set_cookie(
+        key=ACCESS_COOKIE,
+        value=token,
+        max_age=settings.jwt_expire_minutes * 60,
+        httponly=True,
+        secure=settings.auth_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+    return {"message": "Your password has been updated."}
 
 
 @session_router.get("/api/chef/me", response_model=dict)

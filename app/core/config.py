@@ -5,7 +5,8 @@ from pathlib import Path
 
 class Settings(BaseSettings):
     database_url: str = os.getenv("DATABASE_URL")
-    frontend_url: str = "http://localhost:5173"
+    frontend_url: str = "http://localhost:8000"
+    frontend_public_url: str | None = None 
 
     smtp_host: str | None = None
     smtp_port: int = 587
