@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60 * 24 * 7
     auth_cookie_secure: bool = False
 
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    google_redirect_uri: str = "http://localhost:8000/api/auth/customer/google/callback"
+
     cloudinary_cloud_name: str | None = None
     cloudinary_api_key: str | None = None
     cloudinary_api_secret: str | None = None
