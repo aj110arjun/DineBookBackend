@@ -5,6 +5,7 @@ from app.models.restaurant_document import (
     RestaurantDocumentType,
 )
 from app.models.restaurant_hours import RestaurantHours
+from app.models.menu import Category, Food, FoodImage, FoodVariant
 from app.models.user import AccountStatus, EmailVerificationCode, User, UserRole
 
 __all__ = [
@@ -15,6 +16,10 @@ __all__ = [
     "RestaurantDocument",
     "RestaurantDocumentType",
     "RestaurantHours",
+    "Category",
+    "Food",
+    "FoodImage",
+    "FoodVariant",
     "User",
     "UserRole",
 ]

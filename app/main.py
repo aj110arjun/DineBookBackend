@@ -12,6 +12,8 @@ from app.routers import (
     customer_restaurants_router,
     manager_auth_router,
     manager_staff_router,
+    manager_menu_router,
+    password_recovery_router,
 )
 from app.routers.customer_auth import session_router
 
@@ -34,11 +36,13 @@ app.add_middleware(
 )
 
 app.include_router(customer_auth_router)
+app.include_router(password_recovery_router)
 app.include_router(customer_restaurants_router)
 app.include_router(session_router)
 app.include_router(admin_auth_router)
 app.include_router(manager_auth_router)
 app.include_router(manager_staff_router)
+app.include_router(manager_menu_router)
 app.include_router(chef_auth_router)
 app.include_router(chef_session_router)
 app.include_router(admin_managers_router)
