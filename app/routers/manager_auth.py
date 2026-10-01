@@ -181,8 +181,6 @@ async def register_manager(
 
     capacity: int = Form(...),
     tables: int = Form(...),
-    latitude: float = Form(...),
-    longitude: float = Form(...),
 
     monday_enabled: bool = Form(False),
     monday_open: str = Form("17:00"),
@@ -259,11 +257,6 @@ async def register_manager(
             detail="Number of tables must be greater than zero.",
         )
 
-    if not -90 <= latitude <= 90:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Latitude must be between -90 and 90.")
-    if not -180 <= longitude <= 180:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Longitude must be between -180 and 180.")
-
     try:
         existing_user = (
             db.query(User.id)
@@ -331,8 +324,6 @@ async def register_manager(
         pin_code=pin_code,
         capacity=capacity,
         tables=tables,
-        latitude=latitude,
-        longitude=longitude,
         status=RestaurantStatus.PENDING,
     )
 

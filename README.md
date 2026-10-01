@@ -80,7 +80,7 @@ A successful registration returns `201 Created` with the new customer's public p
 | `FRONTEND_URL` | Allowed credentialed CORS origin | `http://localhost:5173` |
 | `FRONTEND_PUBLIC_URL` | Public frontend URL used for CORS and post-login redirects when sharing through ngrok | Optional |
 
-For ngrok sharing, expose the Vite frontend port. Vite proxies `/api` requests to the local backend, so visitors use one public frontend URL while the backend remains on port 8000. Set `FRONTEND_PUBLIC_URL` to that exact ngrok origin. If Google sign-in is enabled, set `GOOGLE_REDIRECT_URI` to `<ngrok-origin>/api/auth/customer/google/callback` and add the same URL to the Google OAuth client's authorized redirect URIs.
+For ngrok sharing, expose the Vite frontend port. Vite proxies `/api` requests to the local backend, so visitors use one public frontend URL while the backend remains on port 8000. Set `FRONTEND_PUBLIC_URL` to that exact ngrok origin. Google sign-in chooses its callback from the origin that started the flow, so add both `http://localhost:5173/api/auth/customer/google/callback` and `<ngrok-origin>/api/auth/customer/google/callback` to the Google OAuth client's authorized redirect URIs. When the OAuth consent screen is in Testing mode, add each person who needs to sign in to its Test users list.
 
 ## Structure
 

@@ -97,8 +97,6 @@ def get_restaurant_details(
         "pin_code": restaurant.pin_code,
         "capacity": restaurant.capacity,
         "tables": restaurant.tables,
-        "latitude": float(restaurant.latitude) if restaurant.latitude is not None else None,
-        "longitude": float(restaurant.longitude) if restaurant.longitude is not None else None,
         "status": restaurant.status.value,
         "created_at": restaurant.created_at,
         "updated_at": restaurant.updated_at,
