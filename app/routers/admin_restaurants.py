@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.models.restaurant import Restaurant
+from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.restaurant_document import RestaurantDocument
 from app.models.restaurant_hours import RestaurantHours
 from app.models.user import User, UserRole
@@ -22,7 +22,10 @@ def list_restaurants(
     records = (
         db.query(Restaurant, User)
         .join(User, User.id == Restaurant.manager_id)
-        .filter(User.role == UserRole.MANAGER)
+        .filter(
+            User.role == UserRole.MANAGER,
+            Restaurant.status == RestaurantStatus.APPROVED,
+        )
         .order_by(Restaurant.created_at.desc())
         .all()
     )

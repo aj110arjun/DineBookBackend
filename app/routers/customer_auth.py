@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.email import send_branded_email
+from app.core.otp import verification_code_expired
 from app.core.security import create_access_token, decode_access_token, hash_password, verify_secret
 from app.db.database import get_db
 from app.models.user import AccountStatus, EmailVerificationCode, User, UserRole
@@ -41,16 +42,6 @@ class CustomerEmailRequest(BaseModel):
 
 class CustomerPasswordResetRequest(CustomerEmailCodeRequest):
     new_password: str = Field(min_length=10, max_length=128)
-
-
-def verification_code_expired(expires_at: datetime, now: datetime | None = None) -> bool:
-    """Compare DB timestamps safely whether the driver returns them aware or naive."""
-    current_time = now or datetime.now(timezone.utc)
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    else:
-        expires_at = expires_at.astimezone(timezone.utc)
-    return expires_at <= current_time.astimezone(timezone.utc)
 
 
 def send_verification_email(email: str, code: str) -> None:
