@@ -1,8 +1,6 @@
 import uuid
 import secrets
-import smtplib
 from datetime import datetime, time, timedelta, timezone
-from email.message import EmailMessage
 
 from fastapi import (
     APIRouter,
@@ -21,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core.cloudinary import delete_file, upload_file
 from app.core.config import settings
+from app.core.email import send_branded_email
 from app.core.security import (
     create_access_token,
     decode_access_token,
@@ -53,28 +52,20 @@ class ManagerEmailCodeRequest(ManagerEmailRequest):
 
 
 def send_manager_verification_email(email: str, code: str) -> None:
-    if not settings.smtp_host or not settings.smtp_from_email:
-        raise HTTPException(status_code=503, detail="Email delivery is not configured. Please contact support.")
-    message = EmailMessage()
-    message["Subject"] = "Your DineBook confirmation code"
-    message["From"] = settings.smtp_from_email
-    message["To"] = email
-    message.set_content(f"Your DineBook confirmation code is {code}. It expires in 10 minutes.")
-    try:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as smtp:
-            if settings.smtp_use_tls:
-                smtp.starttls()
-            if settings.smtp_username:
-                smtp.login(settings.smtp_username, settings.smtp_password or "")
-            smtp.send_message(message)
-    except (OSError, smtplib.SMTPException) as exc:
-        raise HTTPException(status_code=503, detail="We couldn’t send the confirmation email. Please try again.") from exc
+    send_branded_email(
+        to=email, subject="Your DineBook confirmation code", title="Confirm your email",
+        intro="Thanks for starting your restaurant manager registration. Enter this code to confirm your email address.",
+        detail="This confirmation code expires in 2 minutes. If you didn’t start this registration, you can ignore this email.",
+        highlight_label="Your confirmation code", highlight_value=code,
+        plain_text=f"Your DineBook confirmation code is {code}. It expires in 2 minutes.",
+        error_detail="We couldn’t send the confirmation email. Please try again.",
+    )
 
 
 def issue_manager_verification_code(db: Session, email: str) -> None:
     code = f"{secrets.randbelow(1_000_000):06d}"
     record = db.query(EmailVerificationCode).filter(EmailVerificationCode.email == email).first()
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=2)
     if record is None:
         record = EmailVerificationCode(email=email, code_hash=hash_password(code), expires_at=expires_at)
         db.add(record)
