@@ -24,7 +24,3 @@ class ManagerRegisterRequest(BaseModel):
     # Restaurant capacity
     capacity: int = Field(gt=0)
     tables: int = Field(gt=0)
-
-    # Location
-    latitude: float | None = None
-    longitude: float | None = None

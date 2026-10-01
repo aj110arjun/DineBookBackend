@@ -5,7 +5,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session
@@ -21,6 +22,7 @@ router = APIRouter(prefix="/api/auth/customer", tags=["customer authentication"]
 session_router = APIRouter(tags=["customer sessions"])
 ACCESS_COOKIE = "dinebook_access_token"
 GOOGLE_STATE_COOKIE = "dinebook_google_oauth_state"
+GOOGLE_REDIRECT_COOKIE = "dinebook_google_oauth_redirect"
 
 
 class CustomerLoginRequest(BaseModel):
@@ -39,6 +41,16 @@ class CustomerEmailRequest(BaseModel):
 
 class CustomerPasswordResetRequest(CustomerEmailCodeRequest):
     new_password: str = Field(min_length=10, max_length=128)
+
+
+def verification_code_expired(expires_at: datetime, now: datetime | None = None) -> bool:
+    """Compare DB timestamps safely whether the driver returns them aware or naive."""
+    current_time = now or datetime.now(timezone.utc)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    else:
+        expires_at = expires_at.astimezone(timezone.utc)
+    return expires_at <= current_time.astimezone(timezone.utc)
 
 
 def send_verification_email(email: str, code: str) -> None:
@@ -108,7 +120,7 @@ def reset_customer_password(payload: CustomerPasswordResetRequest, db: Session =
     customer = db.query(User).filter(User.email == email, User.role == UserRole.CUSTOMER).first()
     verification = db.query(EmailVerificationCode).filter(EmailVerificationCode.email == email).first()
     now = datetime.now(timezone.utc)
-    if customer is None or verification is None or verification.expires_at.replace(tzinfo=timezone.utc) <= now:
+    if customer is None or verification is None or verification_code_expired(verification.expires_at, now):
         raise HTTPException(status_code=400, detail="That reset code has expired. Request a new code.")
     if not verify_secret(payload.code, verification.code_hash):
         raise HTTPException(status_code=400, detail="That reset code is incorrect.")
@@ -151,25 +163,40 @@ def login_customer(payload: CustomerLoginRequest, response: Response, db: Sessio
 
 
 @router.get("/google/login")
-def google_login():
+def google_login(request: Request):
     if not settings.google_client_id or not settings.google_client_secret:
         raise HTTPException(status_code=503, detail="Google sign-in is not configured.")
+    allowed_origins = {settings.frontend_url.rstrip("/")}
+    if settings.frontend_public_url:
+        allowed_origins.add(settings.frontend_public_url.rstrip("/"))
+    origin_header = request.headers.get("origin") or request.headers.get("referer") or ""
+    parsed_origin = urllib.parse.urlsplit(origin_header)
+    request_origin = f"{parsed_origin.scheme}://{parsed_origin.netloc}".rstrip("/") if parsed_origin.scheme and parsed_origin.netloc else ""
+    if request_origin not in allowed_origins:
+        forwarded_host = request.headers.get("x-forwarded-host", "")
+        forwarded_proto = request.headers.get("x-forwarded-proto", "")
+        forwarded_origin = f"{forwarded_proto}://{forwarded_host}".rstrip("/") if forwarded_host and forwarded_proto else ""
+        request_origin = forwarded_origin
+    frontend_origin = request_origin if request_origin in allowed_origins else settings.frontend_url.rstrip("/")
+    redirect_uri = f"{frontend_origin}/api/auth/customer/google/callback"
     state = secrets.token_urlsafe(32)
     query = urllib.parse.urlencode({
         "client_id": settings.google_client_id,
-        "redirect_uri": settings.google_redirect_uri,
+        "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": "openid email profile",
         "state": state,
         "prompt": "select_account",
     })
-    from fastapi.responses import RedirectResponse
     redirect = RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{query}", status_code=302)
     # Attach the CSRF state cookie to the redirect response itself. FastAPI
     # discards cookies set on an injected Response when a different response
     # object (RedirectResponse) is returned.
+    secure_cookie = frontend_origin.startswith("https://") or settings.auth_cookie_secure
     redirect.set_cookie(GOOGLE_STATE_COOKIE, state, max_age=600, httponly=True,
-                        secure=settings.auth_cookie_secure, samesite="lax", path="/")
+                        secure=secure_cookie, samesite="lax", path="/")
+    redirect.set_cookie(GOOGLE_REDIRECT_COOKIE, redirect_uri, max_age=600, httponly=True,
+                        secure=secure_cookie, samesite="lax", path="/")
     return redirect
 
 
@@ -177,20 +204,46 @@ def google_login():
 def google_callback(code: str | None = None, state: str | None = None,
                     error: str | None = None,
                     oauth_state: str | None = Cookie(default=None, alias=GOOGLE_STATE_COOKIE),
+                    oauth_redirect_uri: str | None = Cookie(default=None, alias=GOOGLE_REDIRECT_COOKIE),
                     db: Session = Depends(get_db)):
-    from fastapi.responses import RedirectResponse
+    allowed_origins = {settings.frontend_url.rstrip("/")}
+    if settings.frontend_public_url:
+        allowed_origins.add(settings.frontend_public_url.rstrip("/"))
+    redirect_suffix = "/api/auth/customer/google/callback"
+    redirect_origin = ""
+    if oauth_redirect_uri and oauth_redirect_uri.endswith(redirect_suffix):
+        candidate_origin = oauth_redirect_uri[:-len(redirect_suffix)].rstrip("/")
+        if candidate_origin in allowed_origins:
+            redirect_origin = candidate_origin
+    if not redirect_origin:
+        redirect_origin = settings.frontend_url.rstrip("/")
+    redirect_uri = f"{redirect_origin}{redirect_suffix}"
+    secure_cookie = redirect_origin.startswith("https://") or settings.auth_cookie_secure
 
-    def finish(path: str):
-        target = (settings.frontend_public_url or settings.frontend_url).rstrip("/") + path
-        result = RedirectResponse(target, status_code=302)
+    def popup_result(result_status: str, token: str | None = None):
+        target_origin = json.dumps(redirect_origin)
+        safe_status = json.dumps(result_status)
+        content = f"""<!doctype html><html><head><meta charset="utf-8"><title>DineBook sign-in</title></head>
+<body><p>Completing Google sign-in… You may close this window.</p><script>
+if (window.opener) {{
+  window.opener.postMessage({{ type: "dinebook-google-auth", status: {safe_status} }}, {target_origin});
+  window.setTimeout(() => window.close(), 1000);
+}}
+</script></body></html>"""
+        result = HTMLResponse(content=content)
+        if token:
+            result.set_cookie(ACCESS_COOKIE, token, max_age=settings.jwt_expire_minutes * 60,
+                              httponly=True, secure=secure_cookie, samesite="lax", path="/")
         result.delete_cookie(GOOGLE_STATE_COOKIE, path="/", httponly=True,
-                             secure=settings.auth_cookie_secure, samesite="lax")
+                             secure=secure_cookie, samesite="lax")
+        result.delete_cookie(GOOGLE_REDIRECT_COOKIE, path="/", httponly=True,
+                             secure=secure_cookie, samesite="lax")
         return result
 
     if error or not code or not state or not oauth_state or not secrets.compare_digest(state, oauth_state):
-        return finish("/customer/login?google=failed")
+        return popup_result("failed")
     if not settings.google_client_id or not settings.google_client_secret:
-        return finish("/customer/login?google=unavailable")
+        return popup_result("unavailable")
     try:
         token_request = urllib.request.Request(
             "https://oauth2.googleapis.com/token",
@@ -198,7 +251,7 @@ def google_callback(code: str | None = None, state: str | None = None,
                 "code": code,
                 "client_id": settings.google_client_id,
                 "client_secret": settings.google_client_secret,
-                "redirect_uri": settings.google_redirect_uri,
+                "redirect_uri": redirect_uri,
                 "grant_type": "authorization_code",
             }).encode(),
             headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -217,12 +270,12 @@ def google_callback(code: str | None = None, state: str | None = None,
         if not email or not profile.get("verified_email"):
             raise ValueError("Google account email is not verified")
     except Exception:
-        return finish("/customer/login?google=failed")
+        return popup_result("failed")
 
     customer = db.query(User).filter(User.email == email).first()
     if customer is not None:
         if customer.role != UserRole.CUSTOMER or not customer.is_active:
-            return finish("/customer/login?google=unavailable")
+            return popup_result("unavailable")
         customer.email_verified = True
         if not customer.name and profile.get("name"):
             customer.name = str(profile["name"])[:120]
@@ -244,14 +297,9 @@ def google_callback(code: str | None = None, state: str | None = None,
         db.rollback()
         customer = db.query(User).filter(User.email == email, User.role == UserRole.CUSTOMER).first()
         if customer is None or not customer.is_active:
-            return finish("/customer/login?google=unavailable")
+            return popup_result("unavailable")
     token, _ = create_access_token(str(customer.id))
-    result = RedirectResponse((settings.frontend_public_url or settings.frontend_url).rstrip("/") + "/customer", status_code=302)
-    result.set_cookie(ACCESS_COOKIE, token, max_age=settings.jwt_expire_minutes * 60,
-                      httponly=True, secure=settings.auth_cookie_secure, samesite="lax", path="/")
-    result.delete_cookie(GOOGLE_STATE_COOKIE, path="/", httponly=True,
-                         secure=settings.auth_cookie_secure, samesite="lax")
-    return result
+    return popup_result("success", token)
 
 
 @session_router.get("/api/customer/me", response_model=CustomerResponse)
@@ -312,12 +360,12 @@ def verify_customer_email(payload: CustomerEmailCodeRequest, db: Session = Depen
     customer = db.query(User).filter(User.email == email, User.role == UserRole.CUSTOMER).first()
     if customer is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No customer account was found for this email.")
-    if customer.email_verified:
-        return {"message": "Email address is already confirmed."}
     verification = db.query(EmailVerificationCode).filter(EmailVerificationCode.email == email).first()
     now = datetime.now(timezone.utc)
-    if verification is None or verification.expires_at.replace(tzinfo=timezone.utc) <= now:
+    if verification is None or verification_code_expired(verification.expires_at, now):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="That confirmation code has expired. Request a new code.")
+    if customer.email_verified:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This email address is already confirmed. Sign in to continue.")
     if not verify_secret(payload.code, verification.code_hash):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="That confirmation code is incorrect.")
     customer.email_verified = True

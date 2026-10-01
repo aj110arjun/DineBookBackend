@@ -9,7 +9,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -99,16 +98,6 @@ class Restaurant(Base):
 
     tables: Mapped[int | None] = mapped_column(
         Integer,
-        nullable=True,
-    )
-
-    latitude: Mapped[float | None] = mapped_column(
-        Numeric(10, 7),
-        nullable=True,
-    )
-
-    longitude: Mapped[float | None] = mapped_column(
-        Numeric(10, 7),
         nullable=True,
     )
 
