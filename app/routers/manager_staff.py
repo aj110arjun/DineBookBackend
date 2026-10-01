@@ -1,7 +1,5 @@
 import uuid
 import secrets
-import smtplib
-from email.message import EmailMessage
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -9,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.email import send_branded_email
 from app.core.security import hash_password
 from app.db.database import get_db
 from app.models.user import AccountStatus, User, UserRole
@@ -35,27 +34,18 @@ def chef_dict(chef: User) -> dict:
 
 
 def send_chef_credentials(email: str, name: str, password: str) -> None:
-    if not settings.smtp_host or not settings.smtp_from_email:
-        raise HTTPException(status_code=503, detail="Email delivery is not configured. Please contact support.")
-    message = EmailMessage()
-    message["Subject"] = "Your DineBook chef account"
-    message["From"] = settings.smtp_from_email
-    message["To"] = email
-    message.set_content(
-        f"Hello {name},\n\nYour manager created a DineBook chef account for you.\n"
-        f"Sign in at {settings.frontend_public_url or settings.frontend_url}/chef/login\n\n"
-        f"Email: {email}\nTemporary password: {password}\n\n"
-        "You will be asked to change this password when you first sign in."
+    login_url = f"{settings.frontend_public_url or settings.frontend_url}/chef/login"
+    send_branded_email(
+        to=email, subject="Your DineBook chef account", title="Your chef account is ready",
+        intro=f"Hello {name}, your manager created a DineBook chef account for you.",
+        detail="Sign in with the email address below. For your security, you’ll be asked to change this temporary password when you first sign in.",
+        highlight_label="Temporary password", highlight_value=password,
+        action_label="Sign in to DineBook", action_url=login_url,
+        plain_text=(f"Hello {name},\n\nYour manager created a DineBook chef account for you.\n"
+                    f"Sign in at {login_url}\n\nEmail: {email}\nTemporary password: {password}\n\n"
+                    "You will be asked to change this password when you first sign in."),
+        error_detail="We couldn’t send the chef’s account email. Please try again.",
     )
-    try:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as smtp:
-            if settings.smtp_use_tls:
-                smtp.starttls()
-            if settings.smtp_username:
-                smtp.login(settings.smtp_username, settings.smtp_password or "")
-            smtp.send_message(message)
-    except (OSError, smtplib.SMTPException) as exc:
-        raise HTTPException(status_code=503, detail="We couldn’t send the chef’s account email. Please try again.") from exc
 
 
 

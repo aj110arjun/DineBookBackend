@@ -1,11 +1,9 @@
 import uuid
 import secrets
-import smtplib
 import json
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from pydantic import BaseModel, EmailStr, Field
@@ -13,6 +11,7 @@ from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.email import send_branded_email
 from app.core.security import create_access_token, decode_access_token, hash_password, verify_secret
 from app.db.database import get_db
 from app.models.user import AccountStatus, EmailVerificationCode, User, UserRole
@@ -38,44 +37,85 @@ class CustomerEmailRequest(BaseModel):
     email: EmailStr
 
 
+class CustomerPasswordResetRequest(CustomerEmailCodeRequest):
+    new_password: str = Field(min_length=10, max_length=128)
+
+
 def send_verification_email(email: str, code: str) -> None:
-    if not settings.smtp_host or not settings.smtp_from_email:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Email delivery is not configured. Please contact support.",
-        )
-    message = EmailMessage()
-    message["Subject"] = "Your DineBook confirmation code"
-    message["From"] = settings.smtp_from_email
-    message["To"] = email
-    message.set_content(
-        f"Your DineBook confirmation code is {code}. It expires in 10 minutes."
+    send_branded_email(
+        to=email, subject="Your DineBook confirmation code", title="Confirm your email",
+        intro="Thanks for signing up for DineBook. Enter this code to confirm your email address.",
+        detail="This confirmation code expires in 2 minutes. If you didn’t create a DineBook account, you can ignore this email.",
+        highlight_label="Your confirmation code", highlight_value=code,
+        plain_text=f"Your DineBook confirmation code is {code}. It expires in 2 minutes.",
+        error_detail="We couldn’t send the confirmation email. Please try again.",
     )
-    try:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as smtp:
-            if settings.smtp_use_tls:
-                smtp.starttls()
-            if settings.smtp_username:
-                smtp.login(settings.smtp_username, settings.smtp_password or "")
-            smtp.send_message(message)
-    except (OSError, smtplib.SMTPException) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="We couldn’t send the confirmation email. Please try again.",
-        ) from exc
 
 
 def issue_verification_code(db: Session, email: str) -> None:
     code = f"{secrets.randbelow(1_000_000):06d}"
     record = db.query(EmailVerificationCode).filter(EmailVerificationCode.email == email).first()
     if record is None:
-        record = EmailVerificationCode(email=email, code_hash=hash_password(code), expires_at=datetime.now(timezone.utc) + timedelta(minutes=10))
+        record = EmailVerificationCode(email=email, code_hash=hash_password(code), expires_at=datetime.now(timezone.utc) + timedelta(minutes=2))
         db.add(record)
     else:
         record.code_hash = hash_password(code)
-        record.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        record.expires_at = datetime.now(timezone.utc) + timedelta(minutes=2)
     db.flush()
     send_verification_email(email, code)
+
+
+def send_password_reset_email(email: str, code: str) -> None:
+    send_branded_email(
+        to=email, subject="Your DineBook password reset code", title="Reset your password",
+        intro="We received a request to reset the password for your DineBook account.",
+        detail="This reset code expires in 2 minutes. If you didn’t request a password reset, ignore this email and your password will remain unchanged.",
+        highlight_label="Your reset code", highlight_value=code,
+        plain_text=f"Your DineBook password reset code is {code}. It expires in 2 minutes.",
+        error_detail="We couldn’t send the reset email. Please try again.",
+    )
+
+
+@router.post("/forgot-password")
+def request_password_reset(payload: CustomerEmailRequest, db: Session = Depends(get_db)) -> dict[str, str]:
+    email = str(payload.email).strip().lower()
+    customer = db.query(User).filter(User.email == email, User.role == UserRole.CUSTOMER).first()
+    # Keep the response the same whether or not the address has an account.
+    if customer is None:
+        return {"message": "If an account exists, a password reset code has been sent."}
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    verification = db.query(EmailVerificationCode).filter(EmailVerificationCode.email == email).first()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=2)
+    if verification is None:
+        verification = EmailVerificationCode(email=email, code_hash=hash_password(code), expires_at=expires_at)
+        db.add(verification)
+    else:
+        verification.code_hash = hash_password(code)
+        verification.expires_at = expires_at
+    try:
+        db.flush()
+        send_password_reset_email(email, code)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    return {"message": "If an account exists, a password reset code has been sent."}
+
+
+@router.post("/reset-password")
+def reset_customer_password(payload: CustomerPasswordResetRequest, db: Session = Depends(get_db)) -> dict[str, str]:
+    email = str(payload.email).strip().lower()
+    customer = db.query(User).filter(User.email == email, User.role == UserRole.CUSTOMER).first()
+    verification = db.query(EmailVerificationCode).filter(EmailVerificationCode.email == email).first()
+    now = datetime.now(timezone.utc)
+    if customer is None or verification is None or verification.expires_at.replace(tzinfo=timezone.utc) <= now:
+        raise HTTPException(status_code=400, detail="That reset code has expired. Request a new code.")
+    if not verify_secret(payload.code, verification.code_hash):
+        raise HTTPException(status_code=400, detail="That reset code is incorrect.")
+    customer.password_hash = hash_password(payload.new_password)
+    db.delete(verification)
+    db.commit()
+    return {"message": "Your password has been reset. You can now sign in."}
 
 
 def current_customer(
@@ -141,7 +181,7 @@ def google_callback(code: str | None = None, state: str | None = None,
     from fastapi.responses import RedirectResponse
 
     def finish(path: str):
-        target = settings.frontend_url.rstrip("/") + path
+        target = (settings.frontend_public_url or settings.frontend_url).rstrip("/") + path
         result = RedirectResponse(target, status_code=302)
         result.delete_cookie(GOOGLE_STATE_COOKIE, path="/", httponly=True,
                              secure=settings.auth_cookie_secure, samesite="lax")
@@ -206,7 +246,7 @@ def google_callback(code: str | None = None, state: str | None = None,
         if customer is None or not customer.is_active:
             return finish("/customer/login?google=unavailable")
     token, _ = create_access_token(str(customer.id))
-    result = RedirectResponse(settings.frontend_url.rstrip("/") + "/customer", status_code=302)
+    result = RedirectResponse((settings.frontend_public_url or settings.frontend_url).rstrip("/") + "/customer", status_code=302)
     result.set_cookie(ACCESS_COOKIE, token, max_age=settings.jwt_expire_minutes * 60,
                       httponly=True, secure=settings.auth_cookie_secure, samesite="lax", path="/")
     result.delete_cookie(GOOGLE_STATE_COOKIE, path="/", httponly=True,
