@@ -24,6 +24,7 @@ class RestaurantStatus(str, enum.Enum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     INACTIVE = "INACTIVE"
+    SUSPENDED = "SUSPENDED"
 
 
 class Restaurant(Base):

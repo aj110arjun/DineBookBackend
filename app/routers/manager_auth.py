@@ -155,6 +155,10 @@ def current_manager(
     ):
         raise unauthorized
 
+    restaurant = db.query(Restaurant).filter(Restaurant.manager_id == manager.id).first()
+    if restaurant is not None and restaurant.status == RestaurantStatus.SUSPENDED:
+        raise HTTPException(status_code=403, detail="Your restaurant has been suspended. Please contact DineBook support.")
+
     return manager
 
 
@@ -703,6 +707,10 @@ def login_manager(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Your manager account is not active.",
         )
+
+    linked_restaurant = db.query(Restaurant).filter(Restaurant.manager_id == manager.id).first()
+    if linked_restaurant is not None and linked_restaurant.status == RestaurantStatus.SUSPENDED:
+        raise HTTPException(status_code=403, detail="Your restaurant has been suspended. Please contact DineBook support.")
 
     token, _ = create_access_token(str(manager.id))
 
