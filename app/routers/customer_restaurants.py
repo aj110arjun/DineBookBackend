@@ -7,9 +7,59 @@ from app.db.database import get_db
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.restaurant_document import RestaurantDocument, RestaurantDocumentType
 from app.models.restaurant_hours import RestaurantHours
+from app.models.menu import Category, Food
 
 
 router = APIRouter(prefix="/api/customer/restaurants", tags=["customer restaurants"])
+
+
+@router.get("/{restaurant_id}/menu", response_model=list[dict])
+def get_customer_restaurant_menu(restaurant_id: uuid.UUID, db: Session = Depends(get_db)) -> list[dict]:
+    restaurant = db.query(Restaurant.id).filter(
+        Restaurant.id == restaurant_id,
+        Restaurant.status == RestaurantStatus.APPROVED,
+    ).first()
+    if restaurant is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Restaurant not found.")
+
+    categories = (
+        db.query(Category)
+        .filter(
+            Category.restaurant_id == restaurant_id,
+            Category.is_active.is_(True),
+            Category.deleted_at.is_(None),
+        )
+        .order_by(Category.display_order, Category.name)
+        .all()
+    )
+    return [
+        {
+            "id": str(category.id),
+            "name": category.name,
+            "description": category.description,
+            "foods": [
+                {
+                    "id": str(food.id),
+                    "name": food.name,
+                    "description": food.description,
+                    "is_vegetarian": food.is_vegetarian,
+                    "preparation_time_minutes": food.preparation_time_minutes,
+                    "is_available": food.is_available,
+                    "images": [
+                        {"id": str(image.id), "image_url": image.image_url, "display_order": image.display_order}
+                        for image in sorted(food.images, key=lambda image: image.display_order)
+                    ],
+                    "variants": [
+                        {"id": str(variant.id), "name": variant.name, "price": str(variant.price), "is_available": variant.is_available}
+                        for variant in food.variants
+                    ],
+                }
+                for food in sorted(category.foods, key=lambda food: food.name.lower())
+                if food.deleted_at is None
+            ],
+        }
+        for category in categories
+    ]
 
 
 @router.get("", response_model=list[dict])

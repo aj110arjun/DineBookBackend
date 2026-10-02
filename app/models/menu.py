@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -16,7 +16,7 @@ def now_utc() -> datetime:
 class Category(Base):
     __tablename__ = "categories"
     __table_args__ = (
-        UniqueConstraint("restaurant_id", "name", name="uq_categories_restaurant_name"),
+        Index("uq_categories_restaurant_name_active", "restaurant_id", "name", unique=True, postgresql_where=text("deleted_at IS NULL")),
         Index("ix_categories_restaurant_order", "restaurant_id", "display_order"),
     )
 
@@ -28,6 +28,7 @@ class Category(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc, onupdate=now_utc)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     foods: Mapped[list["Food"]] = relationship(back_populates="category", cascade="all, delete-orphan", passive_deletes=True)
 
 
@@ -45,6 +46,7 @@ class Food(Base):
     is_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc, onupdate=now_utc)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     category: Mapped[Category] = relationship(back_populates="foods")
     images: Mapped[list["FoodImage"]] = relationship(back_populates="food", cascade="all, delete-orphan", passive_deletes=True, order_by="FoodImage.display_order")
     variants: Mapped[list["FoodVariant"]] = relationship(back_populates="food", cascade="all, delete-orphan", passive_deletes=True, order_by="FoodVariant.created_at")
