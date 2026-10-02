@@ -54,6 +54,9 @@ def current_chef(
         or not chef.email_verified
     ):
         raise unauthorized
+    restaurant = db.query(Restaurant).filter(Restaurant.manager_id == chef.manager_id).first()
+    if restaurant is not None and restaurant.status.value == "SUSPENDED":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This restaurant has been suspended.")
     return chef
 
 
@@ -109,6 +112,10 @@ def login_chef(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Your chef account is not active.",
         )
+
+    restaurant = db.query(Restaurant).filter(Restaurant.manager_id == chef.manager_id).first()
+    if restaurant is not None and restaurant.status.value == "SUSPENDED":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This restaurant has been suspended.")
 
     token, _ = create_access_token(str(chef.id))
     response.set_cookie(
