@@ -42,17 +42,7 @@ def get_customer_restaurant_menu(restaurant_id: uuid.UUID, db: Session = Depends
                     "id": str(food.id),
                     "name": food.name,
                     "description": food.description,
-                    "is_vegetarian": food.is_vegetarian,
-                    "preparation_time_minutes": food.preparation_time_minutes,
                     "is_available": food.is_available,
-                    "images": [
-                        {"id": str(image.id), "image_url": image.image_url, "display_order": image.display_order}
-                        for image in sorted(food.images, key=lambda image: image.display_order)
-                    ],
-                    "variants": [
-                        {"id": str(variant.id), "name": variant.name, "price": str(variant.price), "is_available": variant.is_available}
-                        for variant in food.variants
-                    ],
                 }
                 for food in sorted(category.foods, key=lambda food: food.name.lower())
                 if food.deleted_at is None
