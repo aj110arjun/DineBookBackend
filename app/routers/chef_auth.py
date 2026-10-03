@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.core.security import create_access_token, decode_access_token, hash_password, verify_secret
 from app.db.database import get_db
 from app.models.restaurant import Restaurant
+from app.models.menu import Category
 from app.models.user import AccountStatus, User, UserRole
 
 
@@ -162,6 +163,43 @@ def get_current_chef(
     chef: User = Depends(current_chef), db: Session = Depends(get_db)
 ) -> dict:
     return chef_profile(chef, db)
+
+
+@session_router.get("/api/chef/menu", response_model=list[dict])
+def get_chef_menu(
+    chef: User = Depends(current_chef), db: Session = Depends(get_db)
+) -> list[dict]:
+    restaurant = db.query(Restaurant).filter(Restaurant.manager_id == chef.manager_id).first()
+    if restaurant is None:
+        return []
+
+    categories = (
+        db.query(Category)
+        .filter(
+            Category.restaurant_id == restaurant.id,
+            Category.is_active.is_(True),
+            Category.deleted_at.is_(None),
+        )
+        .order_by(Category.display_order, Category.name)
+        .all()
+    )
+    return [
+        {
+            "id": str(category.id),
+            "name": category.name,
+            "foods": [
+                {
+                    "id": str(food.id),
+                    "name": food.name,
+                    "description": food.description,
+                    "is_available": food.is_available,
+                }
+                for food in category.foods
+                if food.deleted_at is None
+            ],
+        }
+        for category in categories
+    ]
 
 
 @router.post("/logout", response_model=dict)
