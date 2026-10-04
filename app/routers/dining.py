@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.models.dining import DiningTable, RestaurantFloor
+from app.models.dining import DiningTable, DiningTableType, RestaurantFloor
 from app.models.restaurant import Restaurant
 from app.models.user import User
 from app.routers.admin_auth import current_admin
@@ -54,7 +54,7 @@ class TableCreate(BaseModel):
     floor_id: uuid.UUID
     table_number: str = Field(min_length=1, max_length=30)
     capacity: int = Field(gt=0, le=50)
-    table_type: str = Field(default="round", pattern="^(round|square|rectangle)$")
+    table_type: DiningTableType = DiningTableType.ROUND
     status: str = Field(default="available", pattern="^(available|reserved|occupied|maintenance)$")
 
     @field_validator("table_number")
@@ -70,7 +70,7 @@ class TableUpdate(BaseModel):
     floor_id: uuid.UUID | None = None
     table_number: str | None = Field(default=None, min_length=1, max_length=30)
     capacity: int | None = Field(default=None, gt=0, le=50)
-    table_type: str | None = Field(default=None, pattern="^(round|square|rectangle)$")
+    table_type: DiningTableType | None = None
     status: str | None = Field(default=None, pattern="^(available|reserved|occupied|maintenance)$")
 
     @field_validator("table_number")
@@ -105,7 +105,7 @@ def table_data(table: DiningTable) -> dict:
     return {
         "id": str(table.id), "floor_id": str(table.floor_id),
         "table_number": table.table_number, "capacity": table.capacity,
-        "seats": table.capacity, "table_type": table.table_type, "status": table.status,
+        "seats": table.capacity, "table_type": table.table_type.value, "status": table.status,
     }
 
 

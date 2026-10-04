@@ -2,13 +2,13 @@ import uuid
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
 from app.core.security import create_access_token, decode_access_token, hash_password, verify_secret
 from app.db.database import get_db
 from app.models.restaurant import Restaurant
-from app.models.menu import Category
+from app.models.menu import Category, Food
 from app.models.user import AccountStatus, User, UserRole
 
 
@@ -174,7 +174,7 @@ def get_chef_menu(
         return []
 
     categories = (
-        db.query(Category)
+        db.query(Category).options(selectinload(Category.foods).selectinload(Food.variants), selectinload(Category.foods).selectinload(Food.images))
         .filter(
             Category.restaurant_id == restaurant.id,
             Category.is_active.is_(True),
@@ -193,6 +193,14 @@ def get_chef_menu(
                     "name": food.name,
                     "description": food.description,
                     "is_available": food.is_available,
+                    "variants": [
+                        {"id": str(variant.id), "name": variant.name, "price": float(variant.price), "is_available": variant.is_available}
+                        for variant in food.variants
+                    ],
+                    "images": [
+                        {"id": str(image.id), "url": image.image_url, "display_order": image.display_order}
+                        for image in food.images
+                    ],
                 }
                 for food in category.foods
                 if food.deleted_at is None
