@@ -2,12 +2,13 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.db.database import get_db
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.restaurant_document import RestaurantDocument
 from app.models.restaurant_hours import RestaurantHours
+from app.models.menu import Category, Food
 from app.models.user import User, UserRole
 from app.core.email import send_branded_email
 from app.routers.admin_auth import current_admin
@@ -133,6 +134,11 @@ def get_restaurant_details(
         )
     }
     hours.sort(key=lambda hour: weekday_order.get(hour.day_of_week.lower(), len(weekday_order)))
+    menu_categories = (
+        db.query(Category).options(selectinload(Category.foods).selectinload(Food.variants), selectinload(Category.foods).selectinload(Food.images))
+        .filter(Category.restaurant_id == restaurant.id, Category.deleted_at.is_(None))
+        .order_by(Category.display_order, Category.name).all()
+    )
 
     return {
         "id": str(restaurant.id),
@@ -166,6 +172,21 @@ def get_restaurant_details(
                 "created_at": document.created_at,
             }
             for document in documents
+        ],
+        "menu": [
+            {
+                "id": str(category.id), "name": category.name, "is_active": category.is_active,
+                "foods": [
+                    {
+                        "id": str(food.id), "name": food.name, "description": food.description,
+                        "is_available": food.is_available,
+                        "variants": [{"id": str(item.id), "name": item.name, "price": float(item.price), "is_available": item.is_available} for item in food.variants],
+                        "images": [{"id": str(item.id), "url": item.image_url} for item in food.images],
+                    }
+                    for food in category.foods if food.deleted_at is None
+                ],
+            }
+            for category in menu_categories
         ],
         "hours": [
             {

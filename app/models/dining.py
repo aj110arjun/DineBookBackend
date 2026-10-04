@@ -1,11 +1,18 @@
 import uuid
+import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, ForeignKeyConstraint, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, ForeignKeyConstraint, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship, synonym
 
 from app.db.database import Base
+
+
+class DiningTableType(str, enum.Enum):
+    ROUND = "round"
+    SQUARE = "square"
+    RECTANGLE = "rectangle"
 
 
 class RestaurantFloor(Base):
@@ -45,7 +52,17 @@ class DiningTable(Base):
     capacity: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     seats = synonym("capacity")
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="available")
-    table_type: Mapped[str] = mapped_column(String(20), nullable=False, default="round")
+    table_type: Mapped[DiningTableType] = mapped_column(
+        Enum(
+            DiningTableType,
+            name="dining_table_type",
+            native_enum=False,
+            length=20,
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
+        ),
+        nullable=False,
+        default=DiningTableType.ROUND,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     floor: Mapped[RestaurantFloor] = relationship(back_populates="tables")
