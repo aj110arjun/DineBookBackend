@@ -1,4 +1,5 @@
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+import uuid
 
 from app.models.user import AccountStatus, UserRole
 
@@ -15,6 +16,8 @@ class CustomerRegisterRequest(BaseModel):
         name = " ".join(value.split())
         if len(name) < 2:
             raise ValueError("Name must contain at least 2 characters")
+        if any(not (character.isalpha() or character.isspace() or character in "'-.") for character in name):
+            raise ValueError("Name may only contain letters, spaces, apostrophes, hyphens, and periods")
         return name
 
     @field_validator("email")
@@ -32,7 +35,7 @@ class CustomerRegisterRequest(BaseModel):
 class CustomerResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
+    id: uuid.UUID
     name: str
     email: EmailStr
     role: UserRole

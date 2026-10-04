@@ -5,6 +5,11 @@ FastAPI customer registration backed by PostgreSQL, SQLAlchemy 2, and Alembic. T
 ## Included
 
 - `POST /api/auth/customer/register` validates name, email, password, and confirmation.
+- `POST /api/auth/customer/login` checks the customer password and returns a signed JWT in the `dinebook_access_token` HttpOnly cookie.
+- `POST /api/auth/chef/login` checks an active chef account and returns the same signed HttpOnly session cookie; `GET /api/chef/me` returns the authenticated chef profile and `POST /api/auth/chef/logout` clears the session.
+- `GET /api/customer/me` validates that cookie and returns the signed-in customer; `POST /api/auth/logout` clears it.
+- The JWT lasts seven days. Unverified customer accounts cannot sign in.
+
 - Email addresses are normalized to lowercase and protected by a database unique index.
 - Passwords are hashed with Argon2; plaintext passwords and hashes are never returned by the API.
 - New records use the shared `users` table with `role=CUSTOMER`, `status=ACTIVE`, and `is_active=true`.
@@ -73,6 +78,9 @@ A successful registration returns `201 Created` with the new customer's public p
 | --- | --- | --- |
 | `DATABASE_URL` | PostgreSQL SQLAlchemy URL (`postgresql+psycopg://...`) | Local `dinebook` role/database URL |
 | `FRONTEND_URL` | Allowed credentialed CORS origin | `http://localhost:5173` |
+| `FRONTEND_PUBLIC_URL` | Public frontend URL used for CORS and post-login redirects when sharing through ngrok | Optional |
+
+For ngrok sharing, expose the Vite frontend port. Vite proxies `/api` requests to the local backend, so visitors use one public frontend URL while the backend remains on port 8000. Set `FRONTEND_PUBLIC_URL` to that exact ngrok origin. Google sign-in chooses its callback from the origin that started the flow, so add both `http://localhost:5173/api/auth/customer/google/callback` and `<ngrok-origin>/api/auth/customer/google/callback` to the Google OAuth client's authorized redirect URIs. When the OAuth consent screen is in Testing mode, add each person who needs to sign in to its Test users list.
 
 ## Structure
 

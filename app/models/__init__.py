@@ -1,3 +1,25 @@
-from app.models.user import AccountStatus, User, UserRole
 
-__all__ = ["AccountStatus", "User", "UserRole"]
+from app.models.restaurant import Restaurant, RestaurantStatus
+from app.models.restaurant_document import (
+    RestaurantDocument,
+    RestaurantDocumentType,
+)
+from app.models.restaurant_hours import RestaurantHours
+from app.models.menu import Category, Food, FoodImage, FoodVariant
+from app.models.user import AccountStatus, EmailVerificationCode, User, UserRole
+
+__all__ = [
+    "AccountStatus",
+    "EmailVerificationCode",
+    "Restaurant",
+    "RestaurantStatus",
+    "RestaurantDocument",
+    "RestaurantDocumentType",
+    "RestaurantHours",
+    "Category",
+    "Food",
+    "FoodImage",
+    "FoodVariant",
+    "User",
+    "UserRole",
+]
