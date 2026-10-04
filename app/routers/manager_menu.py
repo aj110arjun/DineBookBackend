@@ -19,7 +19,7 @@ ALLOWED_MENU_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 class CategoryPayload(BaseModel):
     name: str = Field(min_length=1, max_length=100)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=1000)
     display_order: int = Field(default=0, ge=0)
     is_active: bool = True
 
@@ -29,13 +29,15 @@ class CategoryPayload(BaseModel):
         value = " ".join(value.split())
         if not value:
             raise ValueError("Category name is required.")
+        if any(not (character.isalnum() or character.isspace() or character in "'-.") for character in value):
+            raise ValueError("Category name may only contain letters, numbers, spaces, apostrophes, hyphens, and periods.")
         return value
 
 
 class FoodPayload(BaseModel):
     category_id: uuid.UUID
     name: str = Field(min_length=1, max_length=255)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=2000)
     is_available: bool = True
 
     @field_validator("name")
@@ -44,6 +46,8 @@ class FoodPayload(BaseModel):
         value = " ".join(value.split())
         if not value:
             raise ValueError("Food name is required.")
+        if any(not (character.isalnum() or character.isspace() or character in "'-.") for character in value):
+            raise ValueError("Food name may only contain letters, numbers, spaces, apostrophes, hyphens, and periods.")
         return value
 
 

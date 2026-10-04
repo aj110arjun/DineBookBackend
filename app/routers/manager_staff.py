@@ -26,6 +26,8 @@ class ChefCreateRequest(BaseModel):
         value = " ".join(value.split())
         if len(value) < 2:
             raise ValueError("Name must contain at least 2 characters.")
+        if any(not (character.isalpha() or character.isspace() or character in "'-.") for character in value):
+            raise ValueError("Name may only contain letters, spaces, apostrophes, hyphens, and periods.")
         return value
 
 

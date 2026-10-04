@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session
 
@@ -30,14 +30,29 @@ class CustomerLoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
 
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        return str(value).strip().lower()
+
 
 class CustomerEmailCodeRequest(BaseModel):
     email: EmailStr
     code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
 
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        return str(value).strip().lower()
+
 
 class CustomerEmailRequest(BaseModel):
     email: EmailStr
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        return str(value).strip().lower()
 
 
 class CustomerPasswordResetRequest(CustomerEmailCodeRequest):

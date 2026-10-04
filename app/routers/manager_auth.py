@@ -13,7 +13,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session
 
@@ -46,9 +46,19 @@ router = APIRouter(
 class ManagerEmailRequest(BaseModel):
     email: EmailStr
 
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        return str(value).strip().lower()
+
 
 class ManagerEmailCodeRequest(ManagerEmailRequest):
     code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class ManagerLoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=128)
 
 
 def send_manager_verification_email(email: str, code: str) -> None:
@@ -183,8 +193,8 @@ async def register_manager(
     state: str = Form(...),
     pin_code: str = Form(...),
 
-    capacity: int = Form(...),
-    tables: int = Form(...),
+    capacity: int = Form(..., gt=0),
+    tables: int = Form(..., gt=0),
 
     monday_enabled: bool = Form(False),
     monday_open: str = Form("17:00"),
@@ -237,29 +247,32 @@ async def register_manager(
     state = state.strip()
     pin_code = pin_code.strip()
 
-    if not name:
+    if len(name) < 2 or len(name) > 120:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Manager name is required.",
         )
 
-    if len(password) < 8:
+    if any(not (character.isalpha() or character.isspace() or character in "'-.") for character in name):
+        raise HTTPException(status_code=400, detail="Manager name may only contain letters, spaces, apostrophes, hyphens, and periods.")
+
+    if len(password) < 10 or len(password) > 128:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Password must contain at least 8 characters.",
         )
 
-    if capacity <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Capacity must be greater than zero.",
-        )
-
-    if tables <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Number of tables must be greater than zero.",
-        )
+    for value, label, minimum, maximum in (
+        (restaurant_name, "Restaurant name", 2, 255), (cuisine_type, "Cuisine type", 2, 100),
+        (restaurant_contact, "Restaurant contact", 6, 20), (address, "Address", 2, 500),
+        (city, "City", 2, 100), (state, "State", 2, 100), (pin_code, "PIN code", 3, 20),
+    ):
+        if not minimum <= len(value) <= maximum:
+            raise HTTPException(status_code=400, detail=f"{label} must be between {minimum} and {maximum} characters.")
+    if any(not (character.isalnum() or character.isspace() or character in "'-.") for character in restaurant_name):
+        raise HTTPException(status_code=400, detail="Restaurant name may only contain letters, numbers, spaces, apostrophes, hyphens, and periods.")
+    if len(restaurant_description) > 2000:
+        raise HTTPException(status_code=400, detail="Restaurant description cannot exceed 2000 characters.")
 
     try:
         existing_user = (
@@ -655,12 +668,12 @@ async def register_manager(
 
 @router.post("/login", response_model=dict)
 def login_manager(
-    payload: dict,
+    payload: ManagerLoginRequest,
     response: Response,
     db: Session = Depends(get_db),
 ) -> dict:
-    email = str(payload.get("email", "")).strip().lower()
-    password = str(payload.get("password", ""))
+    email = str(payload.email).strip().lower()
+    password = payload.password
 
     manager = (
         db.query(User)
