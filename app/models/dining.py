@@ -2,7 +2,7 @@ import uuid
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, ForeignKeyConstraint, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, ForeignKeyConstraint, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship, synonym
 
@@ -50,6 +50,7 @@ class DiningTable(Base):
     floor_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     table_number: Mapped[str] = mapped_column(String(30), nullable=False)
     capacity: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    reservation_fee: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=250)
     seats = synonym("capacity")
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="available")
     table_type: Mapped[DiningTableType] = mapped_column(

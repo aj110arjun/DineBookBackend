@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from decimal import Decimal
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -54,6 +55,7 @@ class TableCreate(BaseModel):
     floor_id: uuid.UUID
     table_number: str = Field(min_length=1, max_length=30)
     capacity: int = Field(gt=0, le=50)
+    reservation_fee: Decimal = Field(default=Decimal("250.00"), ge=0, le=100000)
     table_type: DiningTableType = DiningTableType.ROUND
     status: str = Field(default="available", pattern="^(available|reserved|occupied|maintenance)$")
 
@@ -70,6 +72,7 @@ class TableUpdate(BaseModel):
     floor_id: uuid.UUID | None = None
     table_number: str | None = Field(default=None, min_length=1, max_length=30)
     capacity: int | None = Field(default=None, gt=0, le=50)
+    reservation_fee: Decimal | None = Field(default=None, ge=0, le=100000)
     table_type: DiningTableType | None = None
     status: str | None = Field(default=None, pattern="^(available|reserved|occupied|maintenance)$")
 
@@ -106,6 +109,7 @@ def table_data(table: DiningTable) -> dict:
         "id": str(table.id), "floor_id": str(table.floor_id),
         "table_number": table.table_number, "capacity": table.capacity,
         "seats": table.capacity, "table_type": table.table_type.value, "status": table.status,
+        "reservation_fee": float(table.reservation_fee or 0),
     }
 
 
