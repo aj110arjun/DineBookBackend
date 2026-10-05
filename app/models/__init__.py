@@ -8,6 +8,7 @@ from app.models.restaurant_hours import RestaurantHours
 from app.models.menu import Category, Food, FoodImage, FoodVariant
 from app.models.user import AccountStatus, EmailVerificationCode, User, UserRole
 from app.models.dining import DiningTable, Floor, RestaurantFloor
+from app.models.reservation import Reservation, ReservationTable
 
 __all__ = [
     "AccountStatus",
@@ -24,6 +25,8 @@ __all__ = [
     "Floor",
     "RestaurantFloor",
     "DiningTable",
+    "Reservation",
+    "ReservationTable",
     "User",
     "UserRole",
 ]
