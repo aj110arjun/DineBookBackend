@@ -10,6 +10,7 @@ from app.db.database import get_db
 from app.models.dining import DiningTable, RestaurantFloor
 from app.models.reservation import Reservation, ReservationTable
 from app.models.restaurant import Restaurant, RestaurantStatus
+from app.models.restaurant_hours import RestaurantHours
 from app.models.user import User
 from app.routers.customer_auth import current_customer
 from app.routers.chef_auth import current_chef
@@ -19,6 +20,7 @@ customer_router = APIRouter(prefix="/api/customer/reservations", tags=["reservat
 manager_router = APIRouter(prefix="/api/manager/reservations", tags=["manager reservations"])
 chef_router = APIRouter(prefix="/api/chef/reservations", tags=["chef reservations"])
 BLOCKING = ("PENDING_PAYMENT", "CONFIRMED", "SEATED")
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 
 class ReservationCreate(BaseModel):
@@ -63,6 +65,24 @@ def overlapping(db: Session, table_id: uuid.UUID, day: date, start: time, end: t
     ).first() is not None
 
 
+def within_operating_hours(db: Session, restaurant_id: uuid.UUID, day: date, start: time, end: time) -> bool:
+    hours = db.query(RestaurantHours).filter(
+        RestaurantHours.restaurant_id == restaurant_id,
+        RestaurantHours.day_of_week == WEEKDAYS[day.weekday()],
+    ).first()
+    if hours is None or not hours.enabled or hours.open_time is None or hours.close_time is None:
+        return False
+    opens = hours.open_time.hour * 60 + hours.open_time.minute
+    closes = hours.close_time.hour * 60 + hours.close_time.minute
+    starts = start.hour * 60 + start.minute
+    ends = end.hour * 60 + end.minute
+    if closes <= opens:
+        closes += 24 * 60
+    if ends < starts:
+        ends += 24 * 60
+    return opens <= starts and ends <= closes
+
+
 def suitable_tables(db: Session, restaurant_id: uuid.UUID, day: date, start: time, guests: int, lock: bool = False) -> list[DiningTable]:
     end = (datetime.combine(day, start) + timedelta(hours=1, minutes=30)).time()
     query = db.query(DiningTable).join(RestaurantFloor, DiningTable.floor_id == RestaurantFloor.id).filter(
@@ -82,6 +102,10 @@ def availability(restaurant_id: uuid.UUID, reservation_date: date, start_time: t
     if restaurant is None:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
     end = (datetime.combine(reservation_date, start_time) + timedelta(hours=1, minutes=30)).time()
+    if not within_operating_hours(db, restaurant_id, reservation_date, start_time, end):
+        return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.isoformat(),
+                "start_time": start_time.strftime("%H:%M"), "end_time": end.strftime("%H:%M"),
+                "available": False, "tables": [], "reason": "The restaurant is closed or this time is outside its operating hours."}
     tables = suitable_tables(db, restaurant_id, reservation_date, start_time, number_of_guests)
     return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.isoformat(),
             "start_time": start_time.strftime("%H:%M"), "end_time": end.strftime("%H:%M"),
@@ -99,6 +123,8 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
     if restaurant is None:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
     end = (datetime.combine(payload.reservation_date, payload.start_time) + timedelta(hours=1, minutes=30)).time()
+    if not within_operating_hours(db, restaurant.id, payload.reservation_date, payload.start_time, end):
+        raise HTTPException(status_code=409, detail="The restaurant is closed or this time is outside its operating hours.")
     try:
         tables = suitable_tables(db, restaurant.id, payload.reservation_date, payload.start_time, payload.number_of_guests, lock=True)
         if not tables:
@@ -129,6 +155,14 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
 def my_reservations(customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> list[dict]:
     items = db.query(Reservation).filter(Reservation.user_id == customer.id).order_by(Reservation.reservation_date.desc(), Reservation.start_time.desc()).all()
     return [reservation_data(item, db) for item in items]
+
+
+@customer_router.get("/{reservation_id}")
+def get_my_reservation(reservation_id: uuid.UUID, customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> dict:
+    item = db.query(Reservation).filter(Reservation.id == reservation_id, Reservation.user_id == customer.id).first()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Reservation not found.")
+    return reservation_data(item, db)
 
 
 @customer_router.post("/{reservation_id}/cancel")

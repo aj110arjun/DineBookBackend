@@ -752,13 +752,16 @@ def login_manager(
 @router.get("/me", response_model=dict)
 def get_current_manager(
     manager: User = Depends(current_manager),
+    db: Session = Depends(get_db),
 ) -> dict:
+    restaurant_name = db.query(Restaurant.name).filter(Restaurant.manager_id == manager.id).scalar()
     return {
         "id": str(manager.id),
         "name": manager.name,
         "email": manager.email,
         "role": manager.role.value,
         "status": manager.status.value,
+        "restaurant_name": restaurant_name,
     }
 
 
