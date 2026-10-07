@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, Time
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, Time
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -27,6 +27,10 @@ class Reservation(Base):
     special_request: Mapped[str | None] = mapped_column(Text)
     fee_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    fulfillment_type: Mapped[str] = mapped_column(String(20), nullable=False, default="TABLE_ONLY")
+    payment_method: Mapped[str] = mapped_column(String(30), nullable=False, default="PAY_AT_DESK")
+    preorder_items: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    preorder_total: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0.00"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     assignments: Mapped[list["ReservationTable"]] = relationship(back_populates="reservation", cascade="all, delete-orphan")
