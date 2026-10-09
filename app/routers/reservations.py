@@ -14,6 +14,7 @@ from app.models.reservation import Reservation, ReservationTable
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.restaurant_hours import RestaurantHours
 from app.models.user import User
+from app.models.wallet import WalletAccount, WalletTransaction
 from app.routers.customer_auth import current_customer
 from app.routers.chef_auth import current_chef
 from app.routers.manager_auth import current_manager
@@ -44,7 +45,7 @@ class ReservationCreate(BaseModel):
     table_ids: list[uuid.UUID] | None = Field(default=None, min_length=1, max_length=2)
     special_request: str | None = Field(default=None, max_length=1000)
     fulfillment_type: str = Field(default="TABLE_ONLY", pattern="^(TABLE_ONLY|PREORDER)$")
-    payment_method: str = Field(default="PAY_AT_DESK", pattern="^PAY_AT_DESK$")
+    payment_method: str = Field(default="PAY_AT_DESK", pattern="^(PAY_AT_DESK|WALLET)$")
     preorder_items: list[PreorderItem] = Field(default_factory=list, max_length=50)
 
 
@@ -211,16 +212,29 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
         if selected_group is None:
             db.rollback()
             raise HTTPException(status_code=409, detail="That table setup is no longer available. Search again to choose another option.")
+        fee_amount = sum((Decimal(table.reservation_fee) for table in selected_group), Decimal("0.00"))
+        total_amount = fee_amount + preorder_total
+        wallet_account = None
+        if payload.payment_method == "WALLET":
+            wallet_account = db.query(WalletAccount).filter(WalletAccount.user_id == customer.id).with_for_update().first()
+            if wallet_account is None or Decimal(wallet_account.balance) < total_amount:
+                db.rollback()
+                raise HTTPException(status_code=409, detail="Your wallet balance is too low for this reservation.")
+            wallet_account.balance = Decimal(wallet_account.balance) - total_amount
         item = Reservation(user_id=customer.id, restaurant_id=restaurant.id,
             reservation_date=payload.reservation_date, start_time=payload.start_time, end_time=end,
             number_of_guests=payload.number_of_guests, special_request=payload.special_request,
-            status="PENDING_PAYMENT", payment_status="PENDING",
+            status="CONFIRMED" if payload.payment_method == "WALLET" else "PENDING_PAYMENT",
+            payment_status="PAID" if payload.payment_method == "WALLET" else "PENDING",
             fulfillment_type=payload.fulfillment_type, payment_method=payload.payment_method,
             preorder_items=preorder_snapshot or None, preorder_total=preorder_total,
-            fee_amount=sum((Decimal(table.reservation_fee) for table in selected_group), Decimal("0.00")))
+            fee_amount=fee_amount)
         db.add(item)
         db.flush()
         db.add_all([ReservationTable(reservation_id=item.id, table_id=table.id) for table in selected_group])
+        if wallet_account is not None:
+            db.add(WalletTransaction(user_id=customer.id, reservation_id=item.id, amount=-total_amount,
+                transaction_type="DEBIT", description=f"Reservation at {restaurant.name}"))
         db.commit()
         db.refresh(item)
         return reservation_data(item, db)
@@ -252,9 +266,28 @@ def cancel_reservation(reservation_id: uuid.UUID, customer: User = Depends(curre
         raise HTTPException(status_code=404, detail="Reservation not found.")
     if item.status not in ("PENDING_PAYMENT", "CONFIRMED"):
         raise HTTPException(status_code=409, detail="This reservation can no longer be cancelled.")
+    refund_wallet_reservation(db, item)
     item.status = "CANCELLED"
     db.commit()
     return {"message": "Reservation cancelled."}
+
+
+def refund_wallet_reservation(db: Session, item: Reservation) -> None:
+    if item.payment_method != "WALLET" or item.payment_status != "PAID":
+        return
+    existing_refund = db.query(WalletTransaction.id).filter(
+        WalletTransaction.reservation_id == item.id,
+        WalletTransaction.transaction_type == "REFUND",
+    ).first()
+    if existing_refund:
+        return
+    account = db.query(WalletAccount).filter(WalletAccount.user_id == item.user_id).with_for_update().first()
+    if account is None:
+        raise HTTPException(status_code=409, detail="Wallet account is unavailable; contact support to complete this refund.")
+    refund_amount = Decimal(item.fee_amount) + Decimal(item.preorder_total or 0)
+    account.balance = Decimal(account.balance) + refund_amount
+    db.add(WalletTransaction(user_id=item.user_id, reservation_id=item.id, amount=refund_amount,
+        transaction_type="REFUND", description="Wallet refund for cancelled reservation"))
 
 
 @manager_router.get("")
@@ -334,6 +367,7 @@ def manager_cancel_reservation(reservation_id: uuid.UUID, manager: User = Depend
         raise HTTPException(status_code=404, detail="Reservation not found.")
     if item.status in ("CANCELLED", "COMPLETED"):
         raise HTTPException(status_code=409, detail="This reservation can no longer be cancelled.")
+    refund_wallet_reservation(db, item)
     item.status = "CANCELLED"
     db.commit()
     return {"message": "Reservation cancelled."}
