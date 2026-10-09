@@ -9,6 +9,7 @@ from app.models.menu import Category, Food, FoodImage, FoodVariant
 from app.models.user import AccountStatus, EmailVerificationCode, User, UserRole
 from app.models.dining import DiningTable, Floor, RestaurantFloor
 from app.models.reservation import Reservation, ReservationTable
+from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction
 
 __all__ = [
     "AccountStatus",
@@ -27,6 +28,9 @@ __all__ = [
     "DiningTable",
     "Reservation",
     "ReservationTable",
+    "WalletAccount",
+    "WalletTopUp",
+    "WalletTransaction",
     "User",
     "UserRole",
 ]

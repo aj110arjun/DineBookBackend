@@ -57,12 +57,15 @@ The application reads `Backend/src/.env` and process environment variables. `.en
 | `SMTP_FROM_EMAIL`, `SMTP_USE_TLS` | Sender address and SMTP TLS behavior |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Google OAuth credentials for customer sign-in |
 | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | Cloudinary credentials for document and menu image storage |
+| `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Razorpay Standard Checkout credentials for customer wallet top-ups; the secret remains server-side |
 
 For ngrok development, expose the Vite frontend and set `FRONTEND_PUBLIC_URL` to that origin. Vite proxies `/api` to the local backend. Add the local and public callback URLs to the Google OAuth client when using Google sign-in; the local callback is `http://localhost:8000/api/auth/customer/google/callback`.
 
 ## API capabilities
 
 All endpoints are under `/api`. The generated `/docs` page lists request models, authentication requirements, and response schemas.
+
+Customer wallet top-ups create Razorpay orders on the server and credit the wallet only after the payment signature and captured payment amount are verified. Configure Razorpay test keys in `Backend/src/.env` for local testing, and apply all migrations with `venv/bin/alembic upgrade head` before using wallet top-ups.
 
 | Area | Routes and behavior |
 | --- | --- |
