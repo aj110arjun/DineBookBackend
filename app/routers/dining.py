@@ -74,7 +74,7 @@ class TableUpdate(BaseModel):
     capacity: int | None = Field(default=None, gt=0, le=50)
     reservation_fee: Decimal | None = Field(default=None, ge=0, le=100000)
     table_type: DiningTableType | None = None
-    status: str | None = Field(default=None, pattern="^(available|reserved|occupied|maintenance)$")
+    status: str | None = Field(default=None, pattern="^(available|reserved|occupied|maintenance|inactive)$")
 
     @field_validator("table_number")
     @classmethod
@@ -94,13 +94,13 @@ def get_manager_restaurant(manager: User, db: Session) -> Restaurant:
     return restaurant
 
 
-def floor_data(floor: RestaurantFloor, tables: list[DiningTable] | None = None) -> dict:
+def floor_data(floor: RestaurantFloor, tables: list[DiningTable] | None = None, include_inactive: bool = True) -> dict:
     return {
         "id": str(floor.id), "restaurant_id": str(floor.restaurant_id),
         "floor_number": floor.floor_number, "floor_name": floor.floor_name,
         "name": floor.floor_name, "description": floor.description,
         "is_active": floor.is_active,
-        "tables": [table_data(table) for table in (tables if tables is not None else floor.tables)],
+        "tables": [table_data(table) for table in (tables if tables is not None else floor.tables) if include_inactive or table.status != "inactive"],
     }
 
 
@@ -113,11 +113,11 @@ def table_data(table: DiningTable) -> dict:
     }
 
 
-def list_floor_data(restaurant_id: uuid.UUID, db: Session) -> list[dict]:
+def list_floor_data(restaurant_id: uuid.UUID, db: Session, include_inactive_tables: bool = False) -> list[dict]:
     floors = (db.query(RestaurantFloor).filter(
         RestaurantFloor.restaurant_id == restaurant_id, RestaurantFloor.is_active.is_(True)
     ).order_by(RestaurantFloor.floor_number).all())
-    return [floor_data(floor) for floor in floors]
+    return [floor_data(floor, include_inactive=include_inactive_tables) for floor in floors]
 
 
 def owned_floor(floor_id: uuid.UUID, restaurant_id: uuid.UUID, db: Session, active: bool = True) -> RestaurantFloor:
@@ -149,7 +149,7 @@ def duplicate_error(exc: IntegrityError) -> HTTPException:
 @manager_router.get("/floors")
 def manager_floors(manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> list[dict]:
     restaurant = get_manager_restaurant(manager, db)
-    return list_floor_data(restaurant.id, db)
+    return list_floor_data(restaurant.id, db, include_inactive_tables=True)
 
 
 @manager_router.post("/floors", status_code=status.HTTP_201_CREATED)
@@ -193,7 +193,7 @@ def update_floor(floor_id: uuid.UUID, payload: FloorUpdate, manager: User = Depe
 def delete_floor(floor_id: uuid.UUID, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
     restaurant = get_manager_restaurant(manager, db)
     floor = owned_floor(floor_id, restaurant.id, db, active=False)
-    if db.query(DiningTable.id).filter(DiningTable.floor_id == floor.id).first():
+    if db.query(DiningTable.id).filter(DiningTable.floor_id == floor.id, DiningTable.status != "inactive").first():
         raise HTTPException(status_code=409, detail="Move or delete this floor's tables before deactivating the floor.")
     floor.is_active = False
     floor.updated_at = datetime.now(timezone.utc)
@@ -242,8 +242,6 @@ def update_table(table_id: uuid.UUID, payload: TableUpdate, manager: User = Depe
     restaurant = get_manager_restaurant(manager, db)
     table = owned_table(table_id, restaurant.id, db)
     changes = payload.model_dump(exclude_unset=True)
-    if changes.get("is_active") is False and db.query(DiningTable.id).filter(DiningTable.floor_id == floor.id).first():
-        raise HTTPException(status_code=409, detail="Move or delete this floor's tables before deactivating the floor.")
     target_floor = changes.get("floor_id", table.floor_id)
     owned_floor(target_floor, restaurant.id, db)
     for key, value in changes.items():
@@ -262,13 +260,12 @@ def update_table(table_id: uuid.UUID, payload: TableUpdate, manager: User = Depe
 def delete_table(table_id: uuid.UUID, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
     restaurant = get_manager_restaurant(manager, db)
     table = owned_table(table_id, restaurant.id, db)
-    db.delete(table)
-    try:
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="This table is referenced by existing records and cannot be deleted.") from exc
-    return {"message": "Table deleted."}
+    if table.status == "inactive":
+        raise HTTPException(status_code=409, detail="This table is already inactive.")
+    table.status = "inactive"
+    table.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"message": "Table deactivated."}
 
 
 @chef_router.get("")
@@ -290,4 +287,4 @@ def admin_floors(restaurant_id: uuid.UUID, admin: User = Depends(current_admin),
     restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
     if restaurant is None:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
-    return list_floor_data(restaurant.id, db)
+    return list_floor_data(restaurant.id, db, include_inactive_tables=True)

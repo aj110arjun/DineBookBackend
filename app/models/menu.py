@@ -48,13 +48,15 @@ class Food(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc, onupdate=now_utc)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     category: Mapped[Category] = relationship(back_populates="foods")
-    images: Mapped[list["FoodImage"]] = relationship(back_populates="food", cascade="all, delete-orphan", passive_deletes=True, order_by="FoodImage.display_order")
+    image: Mapped["FoodImage | None"] = relationship(back_populates="food", cascade="all, delete-orphan", passive_deletes=True, uselist=False)
     variants: Mapped[list["FoodVariant"]] = relationship(back_populates="food", cascade="all, delete-orphan", passive_deletes=True, order_by="FoodVariant.created_at")
 
 
 class FoodImage(Base):
     __tablename__ = "food_images"
-    __table_args__ = (Index("ix_food_images_item_order", "food_item_id", "display_order"),)
+    __table_args__ = (
+        Index("uq_food_images_food_item_id", "food_item_id", unique=True),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     food_item_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("food.id", ondelete="CASCADE"), nullable=False)
@@ -62,7 +64,7 @@ class FoodImage(Base):
     public_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
-    food: Mapped[Food] = relationship(back_populates="images")
+    food: Mapped[Food] = relationship(back_populates="image")
 
 
 class FoodVariant(Base):
@@ -76,4 +78,5 @@ class FoodVariant(Base):
     is_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc, onupdate=now_utc)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     food: Mapped[Food] = relationship(back_populates="variants")

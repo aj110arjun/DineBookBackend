@@ -59,23 +59,25 @@ def owned_restaurant(manager: User, db: Session) -> Restaurant:
     return restaurant
 
 
-def category_dict(category: Category, include_food: bool = False) -> dict:
+def category_dict(category: Category, include_food: bool = False, restaurant_name: str | None = None) -> dict:
     result = {
         "id": str(category.id), "restaurant_id": str(category.restaurant_id), "name": category.name,
         "description": category.description, "display_order": category.display_order,
         "is_active": category.is_active,
     }
     if include_food:
-        result["foods"] = [food_dict(food) for food in category.foods if food.deleted_at is None]
+        result["foods"] = [food_dict(food, restaurant_name) for food in category.foods if food.deleted_at is None]
     return result
 
 
-def food_dict(food: Food) -> dict:
+def food_dict(food: Food, restaurant_name: str | None = None) -> dict:
     return {
         "id": str(food.id), "restaurant_id": str(food.restaurant_id), "category_id": str(food.category_id),
         "name": food.name, "description": food.description, "is_available": food.is_available,
-        "variants": [{"id": str(item.id), "name": item.name, "price": float(item.price), "is_available": item.is_available} for item in food.variants],
-        "images": [{"id": str(item.id), "url": item.image_url, "display_order": item.display_order} for item in food.images],
+        "restaurant_name": restaurant_name,
+        "image_url": food.image.image_url if food.image else None,
+        "image_id": str(food.image.id) if food.image else None,
+        "variants": [{"id": str(item.id), "name": item.name, "price": float(item.price), "is_available": item.is_available} for item in food.variants if item.deleted_at is None],
     }
 
 
@@ -116,10 +118,10 @@ def apply_food_payload(food: Food, payload: FoodPayload) -> None:
 def list_menu(manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> list[dict]:
     restaurant = owned_restaurant(manager, db)
     categories = (
-        db.query(Category).options(selectinload(Category.foods).selectinload(Food.variants), selectinload(Category.foods).selectinload(Food.images))
+        db.query(Category).options(selectinload(Category.foods).selectinload(Food.variants), selectinload(Category.foods).selectinload(Food.image))
         .filter(Category.restaurant_id == restaurant.id, Category.deleted_at.is_(None)).order_by(Category.display_order, Category.name).all()
     )
-    return [category_dict(category, include_food=True) for category in categories]
+    return [category_dict(category, include_food=True, restaurant_name=restaurant.name) for category in categories]
 
 
 @router.post("/categories", status_code=status.HTTP_201_CREATED)
@@ -239,7 +241,7 @@ def create_variant(food_id: uuid.UUID, payload: VariantPayload, manager: User = 
 def update_variant(food_id: uuid.UUID, variant_id: uuid.UUID, payload: VariantPayload, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
     restaurant = owned_restaurant(manager, db)
     food = owned_food(food_id, restaurant.id, db)
-    variant = db.query(FoodVariant).filter(FoodVariant.id == variant_id, FoodVariant.food_id == food.id).first()
+    variant = db.query(FoodVariant).filter(FoodVariant.id == variant_id, FoodVariant.food_id == food.id, FoodVariant.deleted_at.is_(None)).first()
     if variant is None:
         raise HTTPException(status_code=404, detail="Menu variant not found.")
     for key, value in payload.model_dump().items():
@@ -252,12 +254,12 @@ def update_variant(food_id: uuid.UUID, variant_id: uuid.UUID, payload: VariantPa
 def delete_variant(food_id: uuid.UUID, variant_id: uuid.UUID, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict[str, str]:
     restaurant = owned_restaurant(manager, db)
     food = owned_food(food_id, restaurant.id, db)
-    variant = db.query(FoodVariant).filter(FoodVariant.id == variant_id, FoodVariant.food_id == food.id).first()
+    variant = db.query(FoodVariant).filter(FoodVariant.id == variant_id, FoodVariant.food_id == food.id, FoodVariant.deleted_at.is_(None)).first()
     if variant is None:
         raise HTTPException(status_code=404, detail="Menu variant not found.")
-    db.delete(variant)
+    variant.deleted_at = datetime.now(timezone.utc)
     db.commit()
-    return {"message": "Menu variant deleted."}
+    return {"message": "Menu variant moved to deleted items."}
 
 
 @router.post("/food/{food_id}/images", status_code=status.HTTP_201_CREATED)
@@ -278,26 +280,39 @@ async def upload_food_image(food_id: uuid.UUID, image: UploadFile = File(...), m
     )
     if not valid_signature:
         raise HTTPException(status_code=400, detail="The uploaded file does not match its image type.")
+    existing = db.query(FoodImage).filter(FoodImage.food_item_id == food.id).first()
+    new_public_id = None
+    old_public_id = existing.public_id if existing else None
     try:
         result = upload_file(content, folder=f"dinebook/restaurants/{restaurant.id}/menu/{food.id}", resource_type="image")
-        public_id, secure_url = result.get("public_id"), result.get("secure_url")
-        if not public_id or not secure_url:
+        new_public_id, secure_url = result.get("public_id"), result.get("secure_url")
+        if not new_public_id or not secure_url:
             raise RuntimeError("Image provider did not return a public ID and URL.")
-        item = FoodImage(food_item_id=food.id, image_url=secure_url, public_id=public_id, display_order=len(food.images))
-        db.add(item)
+        if existing:
+            existing.image_url = secure_url
+            existing.public_id = new_public_id
+            item = existing
+        else:
+            item = FoodImage(food_item_id=food.id, image_url=secure_url, public_id=new_public_id, display_order=0)
+            db.add(item)
         db.commit()
         db.refresh(item)
     except HTTPException:
         raise
     except Exception as exc:
         db.rollback()
-        if "public_id" in locals() and public_id:
+        if new_public_id:
             try:
-                delete_file(public_id)
+                delete_file(new_public_id)
             except Exception:
                 pass
         raise HTTPException(status_code=502, detail="Unable to store this dish image.") from exc
-    return {"id": str(item.id), "url": item.image_url, "display_order": item.display_order}
+    if old_public_id and old_public_id != new_public_id:
+        try:
+            delete_file(old_public_id, resource_type="image")
+        except Exception:
+            pass
+    return {"id": str(item.id), "image_url": item.image_url}
 
 
 @router.delete("/food/{food_id}/images/{image_id}")

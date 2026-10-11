@@ -3,19 +3,21 @@ import hashlib
 import hmac
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import String, or_
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.core.config import settings
 from app.models.user import User, UserRole
 from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction
+from app.models.realtime import RealtimeEvent
 from app.routers.admin_auth import current_admin
 from app.routers.customer_auth import current_customer
 
@@ -47,10 +49,55 @@ def wallet_data(account: WalletAccount, transactions: list[WalletTransaction]) -
         "transactions": [{
             "id": str(item.id), "amount": float(item.amount),
             "type": item.transaction_type, "description": item.description,
+            "reference": item.reference,
             "reservation_id": str(item.reservation_id) if item.reservation_id else None,
             "created_at": item.created_at.isoformat(),
         } for item in transactions],
     }
+
+
+@customer_router.get("/activity")
+def get_wallet_activity(
+    q: str | None = Query(default=None, max_length=120),
+    transaction_type: str | None = Query(default=None, pattern="^(CREDIT|DEBIT)$"),
+    date_from: date | None = None,
+    date_to: date | None = None,
+    sort: str = Query(default="newest", pattern="^(newest|oldest|amount-low|amount-high)$"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
+    customer: User = Depends(current_customer),
+    db: Session = Depends(get_db),
+) -> dict:
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=422, detail="Start date must be on or before end date.")
+    query = db.query(WalletTransaction).filter(WalletTransaction.user_id == customer.id)
+    if q and q.strip():
+        needle = f"%{q.strip()}%"
+        query = query.filter(or_(
+            WalletTransaction.description.ilike(needle),
+            WalletTransaction.reference.ilike(needle),
+            WalletTransaction.reservation_id.cast(String).ilike(needle),
+        ))
+    if transaction_type == "CREDIT":
+        query = query.filter(or_(WalletTransaction.transaction_type.in_(["CREDIT", "REFUND"]), WalletTransaction.amount > 0))
+    elif transaction_type == "DEBIT":
+        query = query.filter(or_(WalletTransaction.transaction_type == "DEBIT", WalletTransaction.amount < 0))
+    if date_from:
+        query = query.filter(WalletTransaction.created_at >= datetime.combine(date_from, time.min, tzinfo=timezone.utc))
+    if date_to:
+        query = query.filter(WalletTransaction.created_at < datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=timezone.utc))
+    total = query.count()
+    if sort == "amount-low":
+        query = query.order_by(WalletTransaction.amount.asc(), WalletTransaction.created_at.desc())
+    elif sort == "amount-high":
+        query = query.order_by(WalletTransaction.amount.desc(), WalletTransaction.created_at.desc())
+    elif sort == "oldest":
+        query = query.order_by(WalletTransaction.created_at.asc(), WalletTransaction.id.asc())
+    else:
+        query = query.order_by(WalletTransaction.created_at.desc(), WalletTransaction.id.desc())
+    rows = query.offset((page - 1) * page_size).limit(page_size).all()
+    transactions = wallet_data(WalletAccount(user_id=customer.id, balance=Decimal("0.00")), rows)["transactions"]
+    return {"transactions": transactions, "total": total, "page": page, "page_size": page_size}
 
 
 @customer_router.get("")
@@ -153,6 +200,8 @@ def verify_topup(payload: WalletTopUpVerification, customer: User = Depends(curr
     topup.paid_at = datetime.now(timezone.utc)
     db.add(WalletTransaction(user_id=customer.id, amount=topup.amount, transaction_type="CREDIT",
         description="Wallet top-up", reference=payload.razorpay_payment_id))
+    db.add(RealtimeEvent(user_id=customer.id, event_type="payment.status_changed",
+        resource_id=str(topup.id), data={"status": "PAID", "resource_type": "wallet_topup"}))
     db.commit()
     db.refresh(account)
     return {"message": "Wallet top-up successful.", "balance": float(account.balance)}

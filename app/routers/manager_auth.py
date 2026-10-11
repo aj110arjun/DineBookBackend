@@ -1,5 +1,7 @@
 import uuid
 import secrets
+import os
+import re
 from datetime import datetime, time, timedelta, timezone
 
 from fastapi import (
@@ -127,6 +129,22 @@ ALLOWED_IMAGE_TYPES = {
     "image/png",
     "image/jpeg",
 }
+
+
+def _matches_allowed_file_signature(content: bytes, allowed_types: set[str]) -> bool:
+    """Check file bytes rather than trusting the client supplied MIME header."""
+    if allowed_types == ALLOWED_DOCUMENT_TYPES:
+        return content.startswith(b"%PDF-") and b"%%EOF" in content[-2048:]
+    if allowed_types == ALLOWED_IMAGE_TYPES:
+        return content.startswith(b"\x89PNG\r\n\x1a\n") or content.startswith(b"\xff\xd8\xff")
+    return False
+
+
+def _safe_display_filename(filename: str | None) -> str:
+    # Keep only display metadata; uploads themselves receive provider-generated IDs.
+    base = os.path.basename((filename or "").replace("\\", "/"))
+    base = re.sub(r"[\x00-\x1f\x7f]", "", base).strip()
+    return base[:255] or "upload"
 
 
 def current_manager(
@@ -428,13 +446,10 @@ async def register_manager(
 
             file_content = await upload.read()
 
-            if (
-                allowed_types == ALLOWED_DOCUMENT_TYPES
-                and b"%PDF-" not in file_content[:1024]
-            ):
+            if not _matches_allowed_file_signature(file_content, allowed_types):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"File '{upload.filename}' must be a valid PDF document.",
+                    detail="Uploaded file content does not match an allowed file type.",
                 )
 
             if len(file_content) > max_size:
@@ -468,7 +483,7 @@ async def register_manager(
                 RestaurantDocument(
                     restaurant_id=restaurant.id,
                     document_type=document_type,
-                    file_name=upload.filename,
+                    file_name=_safe_display_filename(upload.filename),
                     file_path=secure_url,
                 )
             )
@@ -493,6 +508,12 @@ async def register_manager(
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                     detail="Interior media is too large.",
+                )
+
+            if not _matches_allowed_file_signature(file_content, ALLOWED_IMAGE_TYPES):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Interior media content must be a valid PNG or JPEG image.",
                 )
 
             result = upload_file(
@@ -520,7 +541,7 @@ async def register_manager(
                 RestaurantDocument(
                     restaurant_id=restaurant.id,
                     document_type=RestaurantDocumentType.BRANDING_IMAGE,
-                    file_name=interior_media.filename,
+                    file_name=_safe_display_filename(interior_media.filename),
                     file_path=secure_url,
                 )
             )
@@ -754,14 +775,28 @@ def get_current_manager(
     manager: User = Depends(current_manager),
     db: Session = Depends(get_db),
 ) -> dict:
-    restaurant_name = db.query(Restaurant.name).filter(Restaurant.manager_id == manager.id).scalar()
+    restaurant = db.query(Restaurant).filter(Restaurant.manager_id == manager.id).first()
+    hours = []
+    if restaurant is not None:
+        hours = [
+            {
+                "day_of_week": row.day_of_week,
+                "enabled": row.enabled,
+                "open_time": row.open_time.isoformat() if row.open_time else None,
+                "close_time": row.close_time.isoformat() if row.close_time else None,
+            }
+            for row in db.query(RestaurantHours)
+            .filter(RestaurantHours.restaurant_id == restaurant.id)
+            .all()
+        ]
     return {
         "id": str(manager.id),
         "name": manager.name,
         "email": manager.email,
         "role": manager.role.value,
         "status": manager.status.value,
-        "restaurant_name": restaurant_name,
+        "restaurant_name": restaurant.name if restaurant else None,
+        "restaurant_hours": hours,
     }
 
 
