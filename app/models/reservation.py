@@ -27,13 +27,19 @@ class Reservation(Base):
     special_request: Mapped[str | None] = mapped_column(Text)
     fee_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    preorder_payment_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    preorder_payment_method: Mapped[str | None] = mapped_column(String(30), nullable=True)
     fulfillment_type: Mapped[str] = mapped_column(String(20), nullable=False, default="TABLE_ONLY")
     payment_method: Mapped[str] = mapped_column(String(30), nullable=False, default="PAY_AT_DESK")
     preorder_items: Mapped[list | None] = mapped_column(JSON, nullable=True)
     preorder_total: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0.00"))
+    checked_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     assignments: Mapped[list["ReservationTable"]] = relationship(back_populates="reservation", cascade="all, delete-orphan")
+    orders: Mapped[list["FoodOrder"]] = relationship(back_populates="reservation")
 
 
 class ReservationTable(Base):

@@ -23,7 +23,7 @@ def get_customer_restaurant_menu(restaurant_id: uuid.UUID, db: Session = Depends
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Restaurant not found.")
 
     categories = (
-        db.query(Category).options(selectinload(Category.foods).selectinload(Food.variants), selectinload(Category.foods).selectinload(Food.images))
+        db.query(Category).options(selectinload(Category.foods).selectinload(Food.variants), selectinload(Category.foods).selectinload(Food.image))
         .filter(
             Category.restaurant_id == restaurant_id,
             Category.is_active.is_(True),
@@ -43,13 +43,11 @@ def get_customer_restaurant_menu(restaurant_id: uuid.UUID, db: Session = Depends
                     "name": food.name,
                     "description": food.description,
                     "is_available": food.is_available,
+                    "restaurant_name": restaurant.name,
+                    "image_url": food.image.image_url if food.image else None,
                     "variants": [
                         {"id": str(variant.id), "name": variant.name, "price": float(variant.price), "is_available": variant.is_available}
-                        for variant in food.variants
-                    ],
-                    "images": [
-                        {"id": str(image.id), "url": image.image_url, "display_order": image.display_order}
-                        for image in food.images
+                        for variant in food.variants if variant.deleted_at is None
                     ],
                 }
                 for food in sorted(category.foods, key=lambda food: food.name.lower())
