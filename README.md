@@ -45,6 +45,8 @@ The API listens on `http://127.0.0.1:8000`. Interactive docs are at `/docs`, Ope
 
 The application reads `Backend/src/.env` and process environment variables. `.env.example` lists the supported values; configure the ones needed for your deployment.
 
+Responses larger than 1 KiB are gzip-compressed when the client advertises gzip support. Server-sent event streams are left uncompressed so events can be delivered as they are produced.
+
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | SQLAlchemy PostgreSQL URL; required |
@@ -54,6 +56,7 @@ The application reads `Backend/src/.env` and process environment variables. `.en
 | `JWT_SECRET_KEY` | Random signing key of at least 32 characters; required in production |
 | `JWT_EXPIRE_MINUTES` | Session lifetime in minutes; defaults to 10,080 (seven days) |
 | `AUTH_COOKIE_SECURE` | Set to `true` when serving over HTTPS |
+| `MAX_REQUEST_BODY_BYTES` | Maximum accepted request body size; defaults to 20 MiB and must be at least 1 KiB |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD` | SMTP connection settings for verification and account emails |
 | `SMTP_FROM_EMAIL`, `SMTP_USE_TLS` | Sender address and SMTP TLS behavior |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Google OAuth credentials for customer sign-in |

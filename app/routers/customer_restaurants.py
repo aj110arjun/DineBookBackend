@@ -1,6 +1,7 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.database import get_db
@@ -15,7 +16,7 @@ router = APIRouter(prefix="/api/customer/restaurants", tags=["customer restauran
 
 @router.get("/{restaurant_id}/menu", response_model=list[dict])
 def get_customer_restaurant_menu(restaurant_id: uuid.UUID, db: Session = Depends(get_db)) -> list[dict]:
-    restaurant = db.query(Restaurant.id).filter(
+    restaurant = db.query(Restaurant).filter(
         Restaurant.id == restaurant_id,
         Restaurant.status == RestaurantStatus.APPROVED,
     ).first()
@@ -58,14 +59,53 @@ def get_customer_restaurant_menu(restaurant_id: uuid.UUID, db: Session = Depends
     ]
 
 
-@router.get("", response_model=list[dict])
-def list_customer_restaurants(db: Session = Depends(get_db)) -> list[dict]:
-    restaurants = (
-        db.query(Restaurant)
-        .filter(Restaurant.status == RestaurantStatus.APPROVED)
-        .order_by(Restaurant.created_at.desc())
-        .all()
-    )
+@router.get("")
+def list_customer_restaurants(
+    search: str | None = Query(default=None, max_length=100),
+    cuisine: list[str] = Query(default=[]),
+    location: list[str] = Query(default=[]),
+    sort: str = Query(default="newest", pattern="^(newest|name|name-desc)$"),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> dict | list[dict]:
+    base_query = db.query(Restaurant).filter(Restaurant.status == RestaurantStatus.APPROVED)
+    # Keep the unparameterized response compatible with existing callers such as
+    # the landing page and profile. The directory requests paginated results.
+    legacy_call = not any((search, cuisine, location, page, page_size)) and sort == "newest"
+    page = page or 1
+    page_size = page_size or 6
+
+    cuisine_values = [value.strip() for value in cuisine if value.strip()]
+    location_values = [value.strip() for value in location if value.strip()]
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        base_query = base_query.filter(or_(
+            Restaurant.name.ilike(term), Restaurant.cuisine_type.ilike(term),
+            Restaurant.city.ilike(term), Restaurant.state.ilike(term),
+        ))
+    if cuisine_values:
+        base_query = base_query.filter(func.coalesce(Restaurant.cuisine_type, "Restaurant").in_(cuisine_values))
+    if location_values:
+        location_filters = []
+        for value in location_values:
+            parts = [part.strip() for part in value.split(",", 1)]
+            if len(parts) == 2:
+                location_filters.append((Restaurant.city == parts[0]) & (func.coalesce(Restaurant.state, "") == parts[1]))
+            else:
+                location_filters.append(Restaurant.city == parts[0])
+        base_query = base_query.filter(or_(*location_filters))
+
+    total = base_query.count()
+    if sort == "name":
+        base_query = base_query.order_by(func.lower(Restaurant.name), Restaurant.id)
+    elif sort == "name-desc":
+        base_query = base_query.order_by(func.lower(Restaurant.name).desc(), Restaurant.id)
+    else:
+        base_query = base_query.order_by(Restaurant.created_at.desc(), Restaurant.id)
+    if not legacy_call:
+        base_query = base_query.offset((page - 1) * page_size).limit(page_size)
+    restaurants = base_query.all()
     images = (
         db.query(RestaurantDocument.restaurant_id, RestaurantDocument.file_path)
         .filter(
@@ -78,7 +118,7 @@ def list_customer_restaurants(db: Session = Depends(get_db)) -> list[dict]:
     image_by_restaurant = {}
     for restaurant_id, image in images:
         image_by_restaurant.setdefault(restaurant_id, image)
-    return [
+    items = [
         {
             "id": str(restaurant.id),
             "name": restaurant.name,
@@ -94,6 +134,17 @@ def list_customer_restaurants(db: Session = Depends(get_db)) -> list[dict]:
         }
         for restaurant in restaurants
     ]
+    if legacy_call:
+        return items
+    # Facets come from the full approved set so options remain available even
+    # when the current result page does not contain every cuisine or city.
+    facet_rows = db.query(Restaurant.cuisine_type, Restaurant.city, Restaurant.state).filter(
+        Restaurant.status == RestaurantStatus.APPROVED,
+    ).all()
+    cuisines = sorted({row[0] or "Restaurant" for row in facet_rows}, key=str.lower)
+    locations = sorted({", ".join(part for part in (row[1], row[2]) if part) for row in facet_rows if row[1] or row[2]}, key=str.lower)
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "cuisines": cuisines, "locations": locations}
 
 
 @router.get("/{restaurant_id}", response_model=dict)

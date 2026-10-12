@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 import os
 from pathlib import Path
 
@@ -23,6 +24,7 @@ class Settings(BaseSettings):
     jwt_audience: str = "dinebook-web"
     jwt_expire_minutes: int = 60 * 24 * 7
     auth_cookie_secure: bool = False
+    max_request_body_bytes: int = Field(default=20 * 1024 * 1024, ge=1024)
     google_client_id: str | None = None
     google_client_secret: str | None = None
     cloudinary_cloud_name: str | None = None
