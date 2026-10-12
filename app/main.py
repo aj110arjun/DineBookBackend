@@ -1,5 +1,10 @@
-from fastapi import FastAPI
+import time
+import uuid
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 
 from app.core.config import settings
 from app.routers import (
@@ -15,10 +20,82 @@ from app.routers import (
     manager_menu_router,
     password_recovery_router,
 )
+from app.routers.dining import admin_router as admin_dining_router, chef_router as chef_dining_router, customer_router as customer_dining_router, manager_router as manager_dining_router
+from app.routers.reservations import customer_router as customer_reservations_router, manager_router as manager_reservations_router, chef_router as chef_reservations_router
 from app.routers.customer_auth import session_router
+from app.routers.wallet import customer_router as customer_wallet_router, admin_router as admin_wallet_router
+from app.routers.orders import customer_router as customer_orders_router, customer_reservation_orders_router, manager_router as manager_orders_router, manager_reservation_orders_router, chef_router as chef_orders_router, chef_reservation_orders_router, admin_router as admin_orders_router
+from app.routers.webhooks import router as webhooks_router
+from app.routers.realtime import router as realtime_router
 
 
 app = FastAPI(title="DineBook API", version="0.1.0")
+
+
+def apply_security_headers(response, request_id: str, duration_ms: float) -> None:
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+        "base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+    )
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Process-Time-Ms"] = f"{duration_ms:.2f}"
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    started_at = time.perf_counter()
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
+    method = request.method.upper()
+    path = request.url.path
+
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            request_size = int(content_length)
+        except ValueError:
+            response = JSONResponse({"detail": "Invalid Content-Length header."}, status_code=400)
+            apply_security_headers(response, request_id, (time.perf_counter() - started_at) * 1000)
+            return response
+        if request_size < 0:
+            response = JSONResponse({"detail": "Invalid Content-Length header."}, status_code=400)
+            apply_security_headers(response, request_id, (time.perf_counter() - started_at) * 1000)
+            return response
+        if request_size > settings.max_request_body_bytes:
+            response = JSONResponse({"detail": "Request body is too large."}, status_code=413)
+            apply_security_headers(response, request_id, (time.perf_counter() - started_at) * 1000)
+            return response
+
+    if method not in {"GET", "HEAD", "OPTIONS", "TRACE"}:
+        origin = request.headers.get("origin")
+        site = request.headers.get("sec-fetch-site", "").lower()
+        trusted_origins = {settings.frontend_url.rstrip("/")}
+        if settings.frontend_public_url:
+            trusted_origins.add(settings.frontend_public_url.rstrip("/"))
+        if site == "cross-site" or (origin and origin.rstrip("/") not in trusted_origins):
+            response = JSONResponse({"detail": "Request origin is not allowed."}, status_code=403)
+            apply_security_headers(response, request_id, (time.perf_counter() - started_at) * 1000)
+            return response
+    elif path.startswith("/api/events/"):
+        origin = request.headers.get("origin")
+        trusted_origins = {settings.frontend_url.rstrip("/")}
+        if settings.frontend_public_url:
+            trusted_origins.add(settings.frontend_public_url.rstrip("/"))
+        if origin and origin.rstrip("/") not in trusted_origins:
+            response = JSONResponse({"detail": "Request origin is not allowed."}, status_code=403)
+            apply_security_headers(response, request_id, (time.perf_counter() - started_at) * 1000)
+            return response
+
+    response = await call_next(request)
+    apply_security_headers(response, request_id, (time.perf_counter() - started_at) * 1000)
+    if path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,8 +109,9 @@ app.add_middleware(
 ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS", "PATCH", "DELETE"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "Last-Event-ID"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 app.include_router(customer_auth_router)
 app.include_router(password_recovery_router)
@@ -47,6 +125,24 @@ app.include_router(chef_auth_router)
 app.include_router(chef_session_router)
 app.include_router(admin_managers_router)
 app.include_router(admin_restaurants_router)
+app.include_router(manager_dining_router)
+app.include_router(chef_dining_router)
+app.include_router(customer_dining_router)
+app.include_router(admin_dining_router)
+app.include_router(customer_reservations_router)
+app.include_router(customer_wallet_router)
+app.include_router(admin_wallet_router)
+app.include_router(manager_reservations_router)
+app.include_router(chef_reservations_router)
+app.include_router(customer_orders_router)
+app.include_router(customer_reservation_orders_router)
+app.include_router(manager_orders_router)
+app.include_router(manager_reservation_orders_router)
+app.include_router(chef_orders_router)
+app.include_router(chef_reservation_orders_router)
+app.include_router(admin_orders_router)
+app.include_router(webhooks_router)
+app.include_router(realtime_router)
 
 
 @app.get("/api/health", tags=["health"])

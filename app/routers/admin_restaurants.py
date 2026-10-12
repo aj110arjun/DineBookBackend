@@ -2,12 +2,13 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.db.database import get_db
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.restaurant_document import RestaurantDocument
 from app.models.restaurant_hours import RestaurantHours
+from app.models.menu import Category, Food
 from app.models.user import User, UserRole
 from app.core.email import send_branded_email
 from app.routers.admin_auth import current_admin
@@ -29,11 +30,10 @@ def suspend_restaurant(restaurant_id: uuid.UUID, payload: SuspensionRequest,
     if not record:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
     restaurant, manager = record
-    if restaurant.status not in (RestaurantStatus.APPROVED, RestaurantStatus.SUSPENDED):
+    if restaurant.status != RestaurantStatus.APPROVED:
         raise HTTPException(status_code=409, detail="Only approved restaurants can be suspended.")
-    if restaurant.status != RestaurantStatus.SUSPENDED:
-        restaurant.status = RestaurantStatus.SUSPENDED
-        db.commit()
+    restaurant.status = RestaurantStatus.SUSPENDED
+    db.commit()
     reason = payload.reason.strip() or "Please contact DineBook support for more information."
     email_sent = False
     try:
@@ -133,6 +133,11 @@ def get_restaurant_details(
         )
     }
     hours.sort(key=lambda hour: weekday_order.get(hour.day_of_week.lower(), len(weekday_order)))
+    menu_categories = (
+        db.query(Category).options(selectinload(Category.foods).selectinload(Food.variants), selectinload(Category.foods).selectinload(Food.image))
+        .filter(Category.restaurant_id == restaurant.id, Category.deleted_at.is_(None))
+        .order_by(Category.display_order, Category.name).all()
+    )
 
     return {
         "id": str(restaurant.id),
@@ -166,6 +171,22 @@ def get_restaurant_details(
                 "created_at": document.created_at,
             }
             for document in documents
+        ],
+        "menu": [
+            {
+                "id": str(category.id), "name": category.name, "is_active": category.is_active,
+                "foods": [
+                    {
+                        "id": str(food.id), "name": food.name, "description": food.description,
+                        "is_available": food.is_available,
+                        "restaurant_name": restaurant.name,
+                        "image_url": food.image.image_url if food.image else None,
+                        "variants": [{"id": str(item.id), "name": item.name, "price": float(item.price), "is_available": item.is_available} for item in food.variants if item.deleted_at is None],
+                    }
+                    for food in category.foods if food.deleted_at is None
+                ],
+            }
+            for category in menu_categories
         ],
         "hours": [
             {
