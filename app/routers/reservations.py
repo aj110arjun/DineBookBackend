@@ -14,13 +14,13 @@ from app.models.menu import Category, Food, FoodVariant
 from app.models.orders import FoodOrder
 from app.models.reservation import Reservation, ReservationTable
 from app.models.restaurant import Restaurant, RestaurantStatus
-from app.models.restaurant_hours import RestaurantHours
 from app.models.user import User
 from app.models.wallet import WalletAccount, WalletTransaction
 from app.models.realtime import RealtimeEvent
 from app.routers.customer_auth import current_customer
 from app.routers.chef_auth import current_chef
 from app.routers.manager_auth import current_manager
+from app.routers.operating_hours import effective_periods
 
 customer_router = APIRouter(prefix="/api/customer/reservations", tags=["reservations"])
 manager_router = APIRouter(prefix="/api/manager/reservations", tags=["manager reservations"])
@@ -139,21 +139,21 @@ def overlapping(db: Session, table_id: uuid.UUID, day: date, start: time, end: t
 
 
 def within_operating_hours(db: Session, restaurant_id: uuid.UUID, day: date, start: time, end: time) -> bool:
-    hours = db.query(RestaurantHours).filter(
-        RestaurantHours.restaurant_id == restaurant_id,
-        RestaurantHours.day_of_week == WEEKDAYS[day.weekday()],
-    ).first()
-    if hours is None or not hours.enabled or hours.open_time is None or hours.close_time is None:
-        return False
-    opens = hours.open_time.hour * 60 + hours.open_time.minute
-    closes = hours.close_time.hour * 60 + hours.close_time.minute
     starts = start.hour * 60 + start.minute
     ends = end.hour * 60 + end.minute
-    if closes <= opens:
-        closes += 24 * 60
     if ends < starts:
         ends += 24 * 60
-    return opens <= starts and ends <= closes
+    periods, _ = effective_periods(db, restaurant_id, day)
+    for period in periods:
+        opens = time.fromisoformat(period["opens"])
+        closes = time.fromisoformat(period["closes"])
+        opening = opens.hour * 60 + opens.minute
+        closing = closes.hour * 60 + closes.minute
+        if closing <= opening:
+            closing += 24 * 60
+        if opening <= starts and ends <= closing:
+            return True
+    return False
 
 
 def suitable_table_groups(db: Session, restaurant_id: uuid.UUID, day: date, start: time, guests: int, lock: bool = False) -> list[tuple[DiningTable, ...]]:
@@ -228,29 +228,29 @@ def reservation_time_slots(restaurant_id: uuid.UUID, reservation_date: date,
     ).first()
     if restaurant is None:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
-    hours = db.query(RestaurantHours).filter(
-        RestaurantHours.restaurant_id == restaurant_id,
-        RestaurantHours.day_of_week == WEEKDAYS[reservation_date.weekday()],
-    ).first()
+    operating_periods, _ = effective_periods(db, restaurant_id, reservation_date)
     slots = []
-    if hours and hours.enabled and hours.open_time and hours.close_time:
-        opening = hours.open_time.hour * 60 + hours.open_time.minute
-        closing = hours.close_time.hour * 60 + hours.close_time.minute
-        if closing <= opening:
-            closing += 24 * 60
+    if operating_periods:
         now = datetime.now(RESTAURANT_TIMEZONE)
-        for start_minute in range(opening, closing, 30):
-            end_minute = start_minute + 90
-            if end_minute > closing:
-                break
-            slot_day = reservation_date + timedelta(days=start_minute // (24 * 60))
-            minute_of_day = start_minute % (24 * 60)
-            start = time(minute_of_day // 60, minute_of_day % 60)
-            if slot_day <= now.date() or (slot_day == now.date() and start <= now.replace(tzinfo=None).time()):
-                continue
-            groups = suitable_table_groups(db, restaurant_id, reservation_date, start, number_of_guests)
-            slots.append({"time": start.strftime("%H:%M"), "available": bool(groups),
-                          "tables": [table_group_data(group) for group in groups]})
+        for period in operating_periods:
+            opening_time = time.fromisoformat(period["opens"])
+            closing_time = time.fromisoformat(period["closes"])
+            opening = opening_time.hour * 60 + opening_time.minute
+            closing = closing_time.hour * 60 + closing_time.minute
+            if closing <= opening:
+                closing += 24 * 60
+            for start_minute in range(opening, closing, 30):
+                end_minute = start_minute + 90
+                if end_minute > closing:
+                    break
+                slot_day = reservation_date + timedelta(days=start_minute // (24 * 60))
+                minute_of_day = start_minute % (24 * 60)
+                start = time(minute_of_day // 60, minute_of_day % 60)
+                if slot_day <= now.date() or (slot_day == now.date() and start <= now.replace(tzinfo=None).time()):
+                    continue
+                groups = suitable_table_groups(db, restaurant_id, reservation_date, start, number_of_guests)
+                slots.append({"time": start.strftime("%H:%M"), "available": bool(groups),
+                              "tables": [table_group_data(group) for group in groups]})
     return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.isoformat(), "slots": slots}
 
 

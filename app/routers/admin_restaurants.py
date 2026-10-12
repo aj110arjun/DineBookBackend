@@ -194,6 +194,7 @@ def get_restaurant_details(
                 "enabled": hour.enabled,
                 "opens": hour.open_time.strftime("%H:%M") if hour.open_time else None,
                 "closes": hour.close_time.strftime("%H:%M") if hour.close_time else None,
+                "periods": hour.periods if hour.periods is not None else ([{"opens": hour.open_time.strftime("%H:%M"), "closes": hour.close_time.strftime("%H:%M")}] if hour.enabled and hour.open_time and hour.close_time else []),
             }
             for hour in hours
         ],

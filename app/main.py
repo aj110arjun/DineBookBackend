@@ -27,6 +27,7 @@ from app.routers.wallet import customer_router as customer_wallet_router, admin_
 from app.routers.orders import customer_router as customer_orders_router, customer_reservation_orders_router, manager_router as manager_orders_router, manager_reservation_orders_router, chef_router as chef_orders_router, chef_reservation_orders_router, admin_router as admin_orders_router
 from app.routers.webhooks import router as webhooks_router
 from app.routers.realtime import router as realtime_router
+from app.routers.operating_hours import admin_router as admin_operating_hours_router, chef_router as chef_operating_hours_router, customer_router as customer_operating_hours_router, manager_router as manager_operating_hours_router
 
 
 app = FastAPI(title="DineBook API", version="0.1.0")
@@ -143,6 +144,10 @@ app.include_router(chef_reservation_orders_router)
 app.include_router(admin_orders_router)
 app.include_router(webhooks_router)
 app.include_router(realtime_router)
+app.include_router(customer_operating_hours_router)
+app.include_router(manager_operating_hours_router)
+app.include_router(chef_operating_hours_router)
+app.include_router(admin_operating_hours_router)
 
 
 @app.get("/api/health", tags=["health"])
