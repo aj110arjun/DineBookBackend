@@ -70,6 +70,22 @@ class CheckoutInput(BaseModel):
     customer_note: str | None = Field(default=None, max_length=500)
 
 
+class SpotOrderInput(BaseModel):
+    idempotency_key: uuid.UUID
+    table_id: uuid.UUID
+    guest_name: str = Field(min_length=1, max_length=120)
+    items: list[OrderLineInput] = Field(min_length=1, max_length=50)
+    customer_note: str | None = Field(default=None, max_length=500)
+
+    @field_validator("guest_name")
+    @classmethod
+    def clean_guest_name(cls, value: str) -> str:
+        value = " ".join(value.split())
+        if not value:
+            raise ValueError("Guest name is required.")
+        return value
+
+
 class StatusInput(BaseModel):
     status: str = Field(pattern="^(ACCEPTED|PREPARING|READY|COMPLETED|CANCELLED|REJECTED)$")
     reason: str | None = Field(default=None, max_length=500)
@@ -117,18 +133,21 @@ def staff_restaurant(staff: User, db: Session) -> Restaurant:
 
 def serialize(order: FoodOrder, db: Session) -> dict:
     restaurant = db.query(Restaurant).filter(Restaurant.id == order.restaurant_id).first()
-    customer = db.query(User).filter(User.id == order.customer_id).first()
+    customer = db.query(User).filter(User.id == order.customer_id).first() if order.customer_id else None
     reservation = db.query(Reservation).filter(Reservation.id == order.reservation_id).first() if order.reservation_id else None
     assigned_tables = []
     if reservation:
         assigned_tables = db.query(DiningTable).join(ReservationTable, ReservationTable.table_id == DiningTable.id).filter(
             ReservationTable.reservation_id == reservation.id
         ).order_by(DiningTable.table_number).all()
+    elif order.table_id:
+        table = db.query(DiningTable).filter(DiningTable.id == order.table_id).first()
+        assigned_tables = [table] if table else []
     is_preorder = order.idempotency_key == uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(order.reservation_id)) if order.reservation_id else False
     return {
         "id": str(order.id), "reservation_id": str(order.reservation_id) if order.reservation_id else None,
         "is_preorder": is_preorder,
-        "order_source": "PREORDER" if is_preorder else ("RESERVATION" if order.reservation_id else "WALK_IN"),
+        "order_source": "PREORDER" if is_preorder else ("RESERVATION" if order.reservation_id else "SPOT" if order.table_id else "WALK_IN"),
         "reservation": ({"id": str(reservation.id), "status": reservation.status,
             "reservation_date": reservation.reservation_date.isoformat(),
             "start_time": reservation.start_time.strftime("%H:%M"),
@@ -138,9 +157,12 @@ def serialize(order: FoodOrder, db: Session) -> dict:
                         "floor_name": table.floor.floor_name if table.floor else None}
                        for table in assigned_tables]}
             if reservation else None),
+        "tables": [{"id": str(table.id), "table_number": table.table_number,
+                    "floor_name": table.floor.floor_name if table.floor else None} for table in assigned_tables],
         "restaurant_id": str(order.restaurant_id),
+        "table_id": str(order.table_id) if order.table_id else None,
         "restaurant_name": restaurant.name if restaurant else "Restaurant",
-        "customer_id": str(order.customer_id), "customer_name": customer.name if customer else "Customer",
+        "customer_id": str(order.customer_id) if order.customer_id else None, "customer_name": customer.name if customer else (order.guest_name or "Customer"),
         "customer_email": customer.email if customer else None,
         "items": order.items, "subtotal": float(order.subtotal),
         "discount_amount": float(order.discount_amount), "offer_code": order.offer_code,
@@ -164,6 +186,8 @@ def create_reserved_order(reservation_id: uuid.UUID, payload: CheckoutInput, cus
         ).with_for_update().first()
         if reservation is None:
             raise HTTPException(status_code=404, detail="Reservation not found.")
+        if actor is None:
+            raise HTTPException(status_code=409, detail="Food must be ordered as a preorder when making your reservation.")
         if reservation.status != "SEATED":
             raise HTTPException(status_code=409, detail="Orders can only be created while the reservation is seated.")
         if payload.restaurant_id and payload.restaurant_id != reservation.restaurant_id:
@@ -441,6 +465,7 @@ def chef_reservation_orders(reservation_id: uuid.UUID, chef: User = Depends(curr
         raise HTTPException(status_code=404, detail="Reservation not found for this restaurant.")
     rows = db.query(FoodOrder).filter(FoodOrder.reservation_id == reservation.id).order_by(FoodOrder.created_at.asc()).all()
     return [serialize(row, db) for row in rows]
+    
 @customer_router.get("")
 def customer_orders(customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> list[dict]:
     rows = db.query(FoodOrder).filter(FoodOrder.customer_id == customer.id).order_by(FoodOrder.created_at.desc()).all()
@@ -540,6 +565,65 @@ def manager_orders(manager: User = Depends(current_manager), db: Session = Depen
     return list_for_staff(manager, db)
 
 
+@manager_router.post("/spot", status_code=201)
+def manager_create_spot_order(payload: SpotOrderInput, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
+    restaurant = staff_restaurant(manager, db)
+    try:
+        previous = db.query(FoodOrder).filter(FoodOrder.idempotency_key == payload.idempotency_key).first()
+        if previous:
+            if previous.restaurant_id != restaurant.id or previous.table_id != payload.table_id:
+                raise HTTPException(status_code=409, detail="This checkout key was already used for another order.")
+            return serialize(previous, db)
+        table = db.query(DiningTable).filter(
+            DiningTable.id == payload.table_id, DiningTable.restaurant_id == restaurant.id,
+        ).with_for_update().first()
+        if table is None:
+            raise HTTPException(status_code=404, detail="Table not found for this restaurant.")
+        if table.status != "available":
+            raise HTTPException(status_code=409, detail="This table is not available for a spot order.")
+        quantities: dict[uuid.UUID, int] = {}
+        for line in payload.items:
+            quantities[line.variant_id] = quantities.get(line.variant_id, 0) + line.quantity
+        if len(quantities) != len(payload.items):
+            raise HTTPException(status_code=422, detail="Each menu option can only appear once in an order.")
+        variants = db.query(FoodVariant).join(Food, FoodVariant.food_id == Food.id).join(Category, Food.category_id == Category.id).filter(
+            FoodVariant.id.in_(quantities), Food.restaurant_id == restaurant.id,
+            Food.is_available.is_(True), Food.deleted_at.is_(None), FoodVariant.is_available.is_(True), FoodVariant.deleted_at.is_(None),
+            Category.is_active.is_(True), Category.deleted_at.is_(None),
+        ).with_for_update().all()
+        by_id = {variant.id: variant for variant in variants}
+        if set(by_id) != set(quantities):
+            raise HTTPException(status_code=409, detail="One or more menu items are unavailable at this restaurant.")
+        snapshots = []
+        subtotal = Decimal("0.00")
+        for variant_id, quantity in quantities.items():
+            variant = by_id[variant_id]
+            price = Decimal(variant.price).quantize(CENT, rounding=ROUND_HALF_UP)
+            line_total = (price * quantity).quantize(CENT, rounding=ROUND_HALF_UP)
+            subtotal += line_total
+            snapshots.append({"variant_id": str(variant.id), "food_name": variant.food.name,
+                "description": variant.food.description, "image_url": variant.food.image.image_url if variant.food.image else None,
+                "variant_name": variant.name, "quantity": quantity, "unit_price": float(price), "line_total": float(line_total)})
+        subtotal = subtotal.quantize(CENT, rounding=ROUND_HALF_UP)
+        order = FoodOrder(customer_id=None, guest_name=payload.guest_name, table_id=table.id,
+            restaurant_id=restaurant.id, idempotency_key=payload.idempotency_key, items=snapshots,
+            subtotal=subtotal, discount_amount=Decimal("0.00"), total=subtotal, status="PLACED",
+            payment_method="PAY_AT_DESK", payment_status="PENDING", customer_note=payload.customer_note)
+        table.status = "occupied"
+        db.add(order)
+        db.flush()
+        record_order_event(db, order, actor=manager)
+        db.commit()
+        db.refresh(order)
+        return serialize(order, db)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+
+
 @manager_router.get("/{order_id}")
 def manager_order(order_id: uuid.UUID, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
     restaurant = staff_restaurant(manager, db)
@@ -565,6 +649,10 @@ def manager_mark_order_paid(order_id: uuid.UUID, manager: User = Depends(current
     if row.payment_method != "PAY_AT_DESK" or row.status in {"CANCELLED", "REJECTED"}:
         raise HTTPException(status_code=409, detail="This order cannot be marked paid.")
     row.payment_status = "PAID"
+    if row.table_id is not None:
+        table = db.query(DiningTable).filter(DiningTable.id == row.table_id).with_for_update().first()
+        if table is not None and table.status == "occupied":
+            table.status = "available"
     if row.reservation_id is not None and row.idempotency_key == uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(row.reservation_id)):
         reservation = db.query(Reservation).filter(Reservation.id == row.reservation_id).with_for_update().first()
         if reservation is not None:

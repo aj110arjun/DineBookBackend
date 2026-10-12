@@ -2,6 +2,7 @@ import uuid
 from itertools import combinations
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -27,6 +28,7 @@ chef_router = APIRouter(prefix="/api/chef/reservations", tags=["chef reservation
 BLOCKING = ("PENDING_PAYMENT", "CONFIRMED", "SEATED")
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 PREORDER_ORDER_NAMESPACE = uuid.UUID("89dd0385-bbad-4aeb-b600-bf4377641e10")
+RESTAURANT_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
 
 def record_reservation_event(db: Session, item: Reservation, previous_status: str | None = None,
@@ -202,6 +204,10 @@ def availability(restaurant_id: uuid.UUID, reservation_date: date, start_time: t
     if restaurant is None:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
     end = (datetime.combine(reservation_date, start_time) + timedelta(hours=1, minutes=30)).time()
+    if reservation_date <= datetime.now(RESTAURANT_TIMEZONE).date():
+        return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.isoformat(),
+                "start_time": start_time.strftime("%H:%M"), "end_time": end.strftime("%H:%M"),
+                "available": False, "tables": [], "reason": "Reservations must be made at least one day in advance."}
     if not within_operating_hours(db, restaurant_id, reservation_date, start_time, end):
         return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.isoformat(),
                 "start_time": start_time.strftime("%H:%M"), "end_time": end.strftime("%H:%M"),
@@ -232,7 +238,7 @@ def reservation_time_slots(restaurant_id: uuid.UUID, reservation_date: date,
         closing = hours.close_time.hour * 60 + hours.close_time.minute
         if closing <= opening:
             closing += 24 * 60
-        now = datetime.now(timezone.utc)
+        now = datetime.now(RESTAURANT_TIMEZONE)
         for start_minute in range(opening, closing, 30):
             end_minute = start_minute + 90
             if end_minute > closing:
@@ -240,7 +246,7 @@ def reservation_time_slots(restaurant_id: uuid.UUID, reservation_date: date,
             slot_day = reservation_date + timedelta(days=start_minute // (24 * 60))
             minute_of_day = start_minute % (24 * 60)
             start = time(minute_of_day // 60, minute_of_day % 60)
-            if slot_day < now.date() or (slot_day == now.date() and start <= now.replace(tzinfo=None).time()):
+            if slot_day <= now.date() or (slot_day == now.date() and start <= now.replace(tzinfo=None).time()):
                 continue
             groups = suitable_table_groups(db, restaurant_id, reservation_date, start, number_of_guests)
             slots.append({"time": start.strftime("%H:%M"), "available": bool(groups),
@@ -250,9 +256,11 @@ def reservation_time_slots(restaurant_id: uuid.UUID, reservation_date: date,
 
 @customer_router.post("", status_code=status.HTTP_201_CREATED)
 def create_reservation(payload: ReservationCreate, customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> dict:
-    now = datetime.now(timezone.utc)
-    if payload.reservation_date < now.date() or (payload.reservation_date == now.date() and payload.start_time <= now.replace(tzinfo=None).time()):
-        raise HTTPException(status_code=422, detail="Choose a future date and time.")
+    now = datetime.now(RESTAURANT_TIMEZONE)
+    if payload.reservation_date <= now.date():
+        raise HTTPException(status_code=422, detail="Reservations must be made at least one day in advance.")
+    if payload.fulfillment_type != "TABLE_ONLY" or payload.preorder_items:
+        raise HTTPException(status_code=422, detail="Food orders are handled by the restaurant manager at reception.")
     restaurant = db.query(Restaurant).filter(Restaurant.id == payload.restaurant_id, Restaurant.status == RestaurantStatus.APPROVED).first()
     if restaurant is None:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
@@ -280,13 +288,14 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
         for entry in payload.preorder_items:
             variant = variants_by_id[entry.variant_id]
             food = variant.food
-            line_total = Decimal(variant.price) * entry.quantity
+            unit_price = Decimal(variant.price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            line_total = (unit_price * entry.quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             preorder_total += line_total
-        preorder_snapshot.append({"variant_id": str(variant.id), "food_name": food.name,
-            "description": food.description,
-            "image_url": food.image.image_url if food.image else None,
+            preorder_snapshot.append({"variant_id": str(variant.id), "food_name": food.name,
+                "description": food.description,
+                "image_url": food.image.image_url if food.image else None,
                 "variant_name": variant.name, "quantity": entry.quantity,
-                "unit_price": float(variant.price), "line_total": float(line_total)})
+                "unit_price": float(unit_price), "line_total": float(line_total)})
     try:
         requested_table_ids = payload.table_ids or ([payload.table_id] if payload.table_id else [])
         if not requested_table_ids or len(set(requested_table_ids)) != len(requested_table_ids):
