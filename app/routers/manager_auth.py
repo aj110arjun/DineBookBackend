@@ -784,6 +784,7 @@ def get_current_manager(
                 "enabled": row.enabled,
                 "open_time": row.open_time.isoformat() if row.open_time else None,
                 "close_time": row.close_time.isoformat() if row.close_time else None,
+                "periods": row.periods if row.periods is not None else ([{"opens": row.open_time.strftime("%H:%M"), "closes": row.close_time.strftime("%H:%M")}] if row.enabled and row.open_time and row.close_time else []),
             }
             for row in db.query(RestaurantHours)
             .filter(RestaurantHours.restaurant_id == restaurant.id)

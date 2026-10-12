@@ -4,7 +4,7 @@ from app.models.restaurant_document import (
     RestaurantDocument,
     RestaurantDocumentType,
 )
-from app.models.restaurant_hours import RestaurantHours
+from app.models.restaurant_hours import RestaurantHours, RestaurantHoursException
 from app.models.menu import Category, Food, FoodImage, FoodVariant
 from app.models.user import AccountStatus, EmailVerificationCode, User, UserRole
 from app.models.dining import DiningTable, Floor, RestaurantFloor
@@ -21,6 +21,7 @@ __all__ = [
     "RestaurantDocument",
     "RestaurantDocumentType",
     "RestaurantHours",
+    "RestaurantHoursException",
     "Category",
     "Food",
     "FoodImage",

@@ -41,6 +41,12 @@ Apply all migrations and start the API from `Backend/src`:
 
 The API listens on `http://127.0.0.1:8000`. Interactive docs are at `/docs`, OpenAPI JSON is at `/openapi.json`, and the health endpoint is `/api/health`. Schema setup is migration-driven; starting the API does not create tables.
 
+## Operating hours and availability
+
+Manager endpoints under `/api/manager/operating-hours` manage weekly schedules and date exceptions. Chef service hours are read-only at `/api/chef/service-hours`; public weekly/date-specific hours are available at `/api/customer/restaurants/{restaurant_id}/operating-hours`; administrators can inspect schedules and slots under `/api/admin/restaurants/{restaurant_id}/`. Existing single-window weekday schedules remain valid until a manager saves the expanded schedule. Exceptions replace weekly hours for their full date range, and overlapping exceptions or periods are rejected. A schedule change that conflicts with active reservations requires explicit confirmation; reservation records remain intact.
+
+Availability preserves the existing Asia/Kolkata timezone, 30-minute slot interval, and 90-minute reservation duration. Newly configured periods must start and end on the same local date; overnight periods are not accepted by the schedule editor. Apply the new schema with `cd Backend/src && ../venv/bin/alembic upgrade head`.
+
 ## Environment variables
 
 The application reads `Backend/src/.env` and process environment variables. `.env.example` lists the supported values; configure the ones needed for your deployment.
