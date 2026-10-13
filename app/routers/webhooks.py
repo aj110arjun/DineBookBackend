@@ -16,6 +16,7 @@ from app.db.database import get_db
 from app.models.realtime import RealtimeEvent, WebhookReceipt
 from app.models.user import User
 from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction
+from app.models.reservation import Reservation
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 logger = logging.getLogger(__name__)
@@ -111,10 +112,45 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
 
     topup = db.query(WalletTopUp).filter(WalletTopUp.razorpay_order_id == order_id).with_for_update().first()
     if topup is None:
-        # A valid event for another Razorpay product/order is acknowledged but not applied.
-        receipt.outcome = "IGNORED"
-        db.commit()
-        return {"status": "ignored"}
+        reservation = db.query(Reservation).filter(Reservation.razorpay_order_id == order_id).with_for_update().first()
+        if reservation is None:
+            # A valid event for an unrelated Razorpay order is acknowledged but not applied.
+            receipt.outcome = "IGNORED"
+            db.commit()
+            return {"status": "ignored"}
+        if amount != int(Decimal(reservation.fee_amount) * 100):
+            db.rollback()
+            logger.warning("Razorpay captured event amount mismatch for event %s", provider_event_id)
+            raise HTTPException(status_code=400, detail="Captured payment does not match the reservation.")
+        if reservation.payment_status != "PAID":
+            if reservation.status != "PENDING_PAYMENT":
+                receipt.outcome = "REVIEW"
+                db.commit()
+                return {"status": "review_required"}
+            reservation.razorpay_payment_id = payment_id
+            reservation.payment_status = "PAID"
+            reservation.status = "CONFIRMED"
+            db.add(RealtimeEvent(user_id=reservation.user_id, restaurant_id=reservation.restaurant_id,
+                event_type="booking.updated", resource_id=str(reservation.id),
+                data={"status": "CONFIRMED", "payment_status": "PAID",
+                      "occurred_at": datetime.now(timezone.utc).isoformat()}))
+            db.add(RealtimeEvent(user_id=reservation.user_id, restaurant_id=reservation.restaurant_id,
+                event_type="payment.status_changed", resource_id=str(reservation.id),
+                data={"status": "PAID", "resource_type": "reservation"}))
+            receipt.outcome = "PROCESSED"
+        else:
+            receipt.outcome = "DUPLICATE_PAYMENT"
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            logger.info("Razorpay event %s was already applied", provider_event_id)
+            return {"status": "duplicate"}
+        except Exception:
+            db.rollback()
+            logger.exception("Razorpay event processing failed for event %s", provider_event_id)
+            raise HTTPException(status_code=503, detail="Webhook processing failed. Please retry.")
+        return {"status": "processed"}
 
     expected_amount = int(Decimal(topup.amount) * 100)
     if amount != expected_amount:

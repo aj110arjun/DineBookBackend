@@ -27,6 +27,8 @@ class Reservation(Base):
     special_request: Mapped[str | None] = mapped_column(Text)
     fee_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    razorpay_order_id: Mapped[str | None] = mapped_column(String(80), nullable=True, unique=True)
+    razorpay_payment_id: Mapped[str | None] = mapped_column(String(80), nullable=True, unique=True)
     preorder_payment_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     preorder_payment_method: Mapped[str | None] = mapped_column(String(30), nullable=True)
     fulfillment_type: Mapped[str] = mapped_column(String(20), nullable=False, default="TABLE_ONLY")

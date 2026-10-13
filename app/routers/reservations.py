@@ -1,7 +1,13 @@
 import uuid
+import base64
+import hashlib
+import hmac
+import json
 from itertools import combinations
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -9,6 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.database import get_db
+from app.core.config import settings
 from app.models.dining import DiningTable, RestaurantFloor
 from app.models.menu import Category, Food, FoodVariant
 from app.models.orders import FoodOrder
@@ -72,7 +79,7 @@ class ReservationCreate(BaseModel):
     table_ids: list[uuid.UUID] | None = Field(default=None, min_length=1, max_length=2)
     special_request: str | None = Field(default=None, max_length=1000)
     fulfillment_type: str = Field(default="TABLE_ONLY", pattern="^(TABLE_ONLY|PREORDER)$")
-    payment_method: str = Field(default="WALLET", pattern="^WALLET$")
+    payment_method: str = Field(default="WALLET", pattern="^(WALLET|RAZORPAY)$")
     preorder_payment_method: str | None = Field(default=None, pattern="^(PAY_AT_DESK|WALLET)$")
     preorder_items: list[PreorderItem] = Field(default_factory=list, max_length=50)
 
@@ -82,6 +89,26 @@ def restaurant_for_staff(staff: User, db: Session) -> Restaurant:
     if restaurant is None:
         raise HTTPException(status_code=404, detail="No restaurant is linked to this account.")
     return restaurant
+
+
+def razorpay_request(method: str, path: str, body: dict | None = None) -> dict:
+    if not settings.razorpay_key_id or not settings.razorpay_key_secret:
+        raise HTTPException(status_code=503, detail="Online payments are not configured.")
+    token = base64.b64encode(f"{settings.razorpay_key_id}:{settings.razorpay_key_secret}".encode()).decode()
+    request = Request(f"https://api.razorpay.com/v1/{path}",
+        data=json.dumps(body).encode() if body is not None else None, method=method,
+        headers={"Authorization": f"Basic {token}", "Content-Type": "application/json"})
+    try:
+        with urlopen(request, timeout=15) as response:
+            return json.loads(response.read())
+    except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="The payment provider could not complete this request.") from exc
+
+
+class ReservationPaymentVerification(BaseModel):
+    razorpay_order_id: str = Field(min_length=8, max_length=80)
+    razorpay_payment_id: str = Field(min_length=8, max_length=80)
+    razorpay_signature: str = Field(min_length=32, max_length=256)
 
 
 def reservation_data(item: Reservation, db: Session) -> dict:
@@ -98,6 +125,9 @@ def reservation_data(item: Reservation, db: Session) -> dict:
     return {
         "id": str(item.id), "restaurant_id": str(item.restaurant_id), "restaurant_name": restaurant.name if restaurant else "Restaurant",
         "restaurant_location": ", ".join(part for part in (restaurant.city, restaurant.state) if part) if restaurant else None,
+        "restaurant_address": restaurant.address if restaurant else None,
+        "restaurant_email": restaurant.email if restaurant else None,
+        "restaurant_phone": restaurant.phone if restaurant else None,
         "customer_name": customer.name if customer else "Customer",
         "customer_email": customer.email if customer else None, "reservation_date": item.reservation_date.isoformat(),
         "start_time": item.start_time.strftime("%H:%M"), "end_time": item.end_time.strftime("%H:%M"),
@@ -107,6 +137,8 @@ def reservation_data(item: Reservation, db: Session) -> dict:
         "completed_at": item.completed_at.isoformat() if item.completed_at else None,
         "status_reason": item.status_reason,
         "payment_status": item.payment_status, "fee_amount": float(item.fee_amount),
+        "razorpay_order_id": item.razorpay_order_id,
+        "razorpay_payment_id": item.razorpay_payment_id,
         "preorder_payment_method": preorder_payment_method,
         "preorder_payment_status": preorder_payment_status,
         "preorder_due_at_desk": float(item.preorder_total or 0) if item.fulfillment_type == "PREORDER" and preorder_payment_method == "PAY_AT_DESK" and preorder_payment_status == "PENDING" else 0,
@@ -313,29 +345,49 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
         if payload.fulfillment_type != "PREORDER":
             preorder_method = None
         amount_due_now = fee_amount + (preorder_total if preorder_method == "WALLET" else Decimal("0.00"))
-        wallet_account = db.query(WalletAccount).filter(WalletAccount.user_id == customer.id).with_for_update().first()
-        if wallet_account is None or Decimal(wallet_account.balance) < amount_due_now:
-            db.rollback()
-            raise HTTPException(status_code=409, detail="Your wallet balance must cover the reservation fee and any preorder food you choose to pay now.")
-        wallet_account.balance = Decimal(wallet_account.balance) - amount_due_now
+        wallet_account = None
+        if payload.payment_method == "WALLET":
+            wallet_account = db.query(WalletAccount).filter(WalletAccount.user_id == customer.id).with_for_update().first()
+            if wallet_account is None or Decimal(wallet_account.balance) < amount_due_now:
+                db.rollback()
+                raise HTTPException(status_code=409, detail="Your wallet balance must cover the reservation fee and any preorder food you choose to pay now.")
+            wallet_account.balance = Decimal(wallet_account.balance) - amount_due_now
         item = Reservation(user_id=customer.id, restaurant_id=restaurant.id,
             reservation_date=payload.reservation_date, start_time=payload.start_time, end_time=end,
             number_of_guests=payload.number_of_guests, special_request=payload.special_request,
-            status="CONFIRMED", payment_status="PAID",
+            status="CONFIRMED" if payload.payment_method == "WALLET" else "PENDING_PAYMENT",
+            payment_status="PAID" if payload.payment_method == "WALLET" else "PENDING",
             preorder_payment_status=("PAID" if preorder_method == "WALLET" else "PENDING") if preorder_method else None,
             preorder_payment_method=preorder_method,
-            fulfillment_type=payload.fulfillment_type, payment_method="WALLET",
+            fulfillment_type=payload.fulfillment_type, payment_method=payload.payment_method,
             preorder_items=preorder_snapshot or None, preorder_total=preorder_total,
             fee_amount=fee_amount)
         db.add(item)
         db.flush()
+        checkout = None
+        if payload.payment_method == "RAZORPAY":
+            provider_order = razorpay_request("POST", "orders", {
+                "amount": int(fee_amount * 100), "currency": "INR",
+                "receipt": f"reservation_{item.id.hex[:32]}",
+                "notes": {"reservation_id": str(item.id), "customer_id": str(customer.id)},
+            })
+            if provider_order.get("currency") != "INR" or int(provider_order.get("amount", -1)) != int(fee_amount * 100):
+                raise HTTPException(status_code=502, detail="The provider returned an unexpected payment amount.")
+            item.razorpay_order_id = provider_order["id"]
+            checkout = {"key_id": settings.razorpay_key_id, "order_id": provider_order["id"],
+                "amount": provider_order["amount"], "currency": "INR", "name": "DineBook",
+                "description": f"Reservation fee · {restaurant.name}"}
         record_reservation_event(db, item, actor=customer)
         db.add_all([ReservationTable(reservation_id=item.id, table_id=table.id) for table in selected_group])
-        db.add(WalletTransaction(user_id=customer.id, reservation_id=item.id, amount=-amount_due_now,
-            transaction_type="DEBIT", description=f"Reservation at {restaurant.name}"))
+        if payload.payment_method == "WALLET":
+            db.add(WalletTransaction(user_id=customer.id, reservation_id=item.id, amount=-amount_due_now,
+                transaction_type="DEBIT", description=f"Reservation at {restaurant.name}"))
         db.commit()
         db.refresh(item)
-        return reservation_data(item, db)
+        result = reservation_data(item, db)
+        if checkout:
+            result["payment_checkout"] = checkout
+        return result
     except HTTPException:
         raise
     except Exception:
@@ -354,6 +406,41 @@ def get_my_reservation(reservation_id: uuid.UUID, customer: User = Depends(curre
     item = db.query(Reservation).filter(Reservation.id == reservation_id, Reservation.user_id == customer.id).first()
     if item is None:
         raise HTTPException(status_code=404, detail="Reservation not found.")
+    return reservation_data(item, db)
+
+
+@customer_router.post("/{reservation_id}/payment/verify")
+def verify_reservation_payment(reservation_id: uuid.UUID, payload: ReservationPaymentVerification,
+                               customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> dict:
+    item = db.query(Reservation).filter(Reservation.id == reservation_id, Reservation.user_id == customer.id).with_for_update().first()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Reservation not found.")
+    if item.payment_status == "PAID":
+        return reservation_data(item, db)
+    if item.payment_method != "RAZORPAY" or item.razorpay_order_id != payload.razorpay_order_id:
+        raise HTTPException(status_code=409, detail="Payment does not match this reservation.")
+    if not settings.razorpay_key_secret:
+        raise HTTPException(status_code=503, detail="Online payments are not configured.")
+    signed = f"{item.razorpay_order_id}|{payload.razorpay_payment_id}".encode()
+    expected = hmac.new(settings.razorpay_key_secret.encode(), signed, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, payload.razorpay_signature):
+        raise HTTPException(status_code=400, detail="Payment verification failed.")
+    payment = razorpay_request("GET", f"payments/{payload.razorpay_payment_id}")
+    expected_amount = int(Decimal(item.fee_amount) * 100)
+    if (payment.get("order_id") != item.razorpay_order_id or payment.get("amount") != expected_amount
+            or payment.get("currency") != "INR" or payment.get("status") != "captured"):
+        raise HTTPException(status_code=409, detail="Payment is not captured yet. Reservation is still pending.")
+    if item.status != "PENDING_PAYMENT":
+        raise HTTPException(status_code=409, detail="This reservation is no longer awaiting payment.")
+    item.razorpay_payment_id = payload.razorpay_payment_id
+    item.payment_status = "PAID"
+    item.status = "CONFIRMED"
+    record_reservation_event(db, item, previous_status="PENDING_PAYMENT", actor=customer)
+    db.add(RealtimeEvent(user_id=customer.id, restaurant_id=item.restaurant_id,
+        event_type="payment.status_changed", resource_id=str(item.id),
+        data={"status": "PAID", "resource_type": "reservation"}))
+    db.commit()
+    db.refresh(item)
     return reservation_data(item, db)
 
 
