@@ -43,13 +43,16 @@ def razorpay_request(method: str, path: str, body: dict | None = None) -> dict:
         raise HTTPException(status_code=502, detail="Could not reach the payment provider. Please try again.") from exc
 
 
-def wallet_data(account: WalletAccount, transactions: list[WalletTransaction]) -> dict:
+def wallet_data(account: WalletAccount, transactions: list[WalletTransaction], topups: list[WalletTopUp] | None = None) -> dict:
+    topup_by_payment = {item.razorpay_payment_id: item for item in (topups or []) if item.razorpay_payment_id}
     return {
         "balance": float(account.balance),
         "transactions": [{
             "id": str(item.id), "amount": float(item.amount),
             "type": item.transaction_type, "description": item.description,
             "reference": item.reference,
+            "razorpay_order_id": topup_by_payment[item.reference].razorpay_order_id if item.reference in topup_by_payment else None,
+            "payment_status": topup_by_payment[item.reference].status if item.reference in topup_by_payment else None,
             "reservation_id": str(item.reservation_id) if item.reservation_id else None,
             "created_at": item.created_at.isoformat(),
         } for item in transactions],
@@ -96,7 +99,10 @@ def get_wallet_activity(
     else:
         query = query.order_by(WalletTransaction.created_at.desc(), WalletTransaction.id.desc())
     rows = query.offset((page - 1) * page_size).limit(page_size).all()
-    transactions = wallet_data(WalletAccount(user_id=customer.id, balance=Decimal("0.00")), rows)["transactions"]
+    payment_refs = [row.reference for row in rows if row.reference]
+    topups = db.query(WalletTopUp).filter(WalletTopUp.user_id == customer.id,
+        WalletTopUp.razorpay_payment_id.in_(payment_refs)).all() if payment_refs else []
+    transactions = wallet_data(WalletAccount(user_id=customer.id, balance=Decimal("0.00")), rows, topups)["transactions"]
     return {"transactions": transactions, "total": total, "page": page, "page_size": page_size}
 
 
@@ -109,7 +115,10 @@ def get_wallet(customer: User = Depends(current_customer), db: Session = Depends
         db.commit()
         db.refresh(account)
     transactions = db.query(WalletTransaction).filter(WalletTransaction.user_id == customer.id).order_by(WalletTransaction.created_at.desc()).limit(100).all()
-    data = wallet_data(account, transactions)
+    payment_refs = [item.reference for item in transactions if item.reference]
+    topups = db.query(WalletTopUp).filter(WalletTopUp.user_id == customer.id,
+        WalletTopUp.razorpay_payment_id.in_(payment_refs)).all() if payment_refs else []
+    data = wallet_data(account, transactions, topups)
     data["manual_topups_enabled"] = bool(settings.razorpay_key_id and settings.razorpay_key_id.startswith("rzp_test_"))
     return data
 
@@ -150,6 +159,11 @@ class WalletTopUpVerification(BaseModel):
     razorpay_signature: str = Field(min_length=32, max_length=256)
 
 
+class WalletTopUpFailure(BaseModel):
+    razorpay_order_id: str = Field(min_length=8, max_length=80)
+    razorpay_payment_id: str | None = Field(default=None, min_length=8, max_length=80)
+
+
 @customer_router.post("/topups/order")
 def create_topup_order(payload: WalletTopUpRequest, customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> dict:
     if payload.amount.as_tuple().exponent < -2:
@@ -165,6 +179,25 @@ def create_topup_order(payload: WalletTopUpRequest, customer: User = Depends(cur
     db.commit()
     return {"key_id": settings.razorpay_key_id, "order_id": order["id"], "amount": order["amount"],
         "currency": order["currency"], "name": "DineBook", "description": "Add money to your wallet"}
+
+
+@customer_router.post("/topups/failure")
+def record_topup_failure(payload: WalletTopUpFailure, customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> dict:
+    topup = db.query(WalletTopUp).filter(
+        WalletTopUp.razorpay_order_id == payload.razorpay_order_id,
+        WalletTopUp.user_id == customer.id,
+    ).with_for_update().first()
+    if topup is None:
+        raise HTTPException(status_code=404, detail="Wallet top-up order not found.")
+    if topup.status == "PAID":
+        return {"message": "This top-up was already completed.", "status": topup.status}
+    topup.status = "FAILED"
+    if payload.razorpay_payment_id:
+        topup.razorpay_payment_id = payload.razorpay_payment_id
+    db.add(RealtimeEvent(user_id=customer.id, event_type="payment.status_changed",
+        resource_id=str(topup.id), data={"status": "FAILED", "resource_type": "wallet_topup"}))
+    db.commit()
+    return {"message": "Failed wallet payment recorded.", "status": topup.status}
 
 
 @customer_router.post("/topups/verify")
