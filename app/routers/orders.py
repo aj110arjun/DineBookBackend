@@ -17,6 +17,7 @@ from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.user import User
 from app.models.wallet import WalletAccount, WalletTransaction
 from app.models.realtime import RealtimeEvent
+from app.services.notifications import notify_order_status
 from app.routers.admin_auth import current_admin
 from app.routers.chef_auth import current_chef
 from app.routers.customer_auth import current_customer
@@ -53,6 +54,7 @@ def record_order_event(db: Session, order: FoodOrder, previous_status: str | Non
         resource_id=str(order.id),
         data=data,
     ))
+    notify_order_status(db, order, previous_status)
 
 
 def reverse_offer_redemption(db: Session, order: FoodOrder) -> None:

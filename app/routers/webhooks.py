@@ -17,6 +17,9 @@ from app.models.realtime import RealtimeEvent, WebhookReceipt
 from app.models.user import User
 from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction
 from app.models.reservation import Reservation
+from app.services.notifications import create_notification
+from app.services.reservation_email import send_reservation_confirmation
+from app.routers.reservations import cancel_reservation_record
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 logger = logging.getLogger(__name__)
@@ -87,6 +90,55 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
             return {"status": "duplicate"}
         raise HTTPException(status_code=503, detail="Webhook could not be recorded. Please retry.")
 
+    if event_type == "payment.failed":
+        try:
+            payment_entity = payload["payload"]["payment"]["entity"]
+            order_id = payment_entity["order_id"]
+            payment_id = payment_entity["id"]
+        except (KeyError, TypeError):
+            receipt.outcome = "IGNORED"
+            db.commit()
+            return {"status": "ignored"}
+        failed_reservation = db.query(Reservation).filter(Reservation.razorpay_order_id == order_id).with_for_update().first()
+        if failed_reservation and failed_reservation.payment_status != "PAID":
+            cancel_reservation_record(db, failed_reservation, None, "Reservation payment failed.")
+            failed_reservation.payment_status = "FAILED"
+            if failed_reservation.preorder_payment_method == "RAZORPAY":
+                failed_reservation.preorder_payment_status = "FAILED"
+            customer = db.query(User).filter_by(id=failed_reservation.user_id).first()
+            if customer:
+                create_notification(db, customer, notification_type="payment.failed", category="PAYMENT",
+                    title="Reservation payment failed", message="Your reservation payment could not be completed.",
+                    restaurant_id=failed_reservation.restaurant_id, entity_type="reservation", entity_id=failed_reservation.id,
+                    action_url=f"/customer/profile/reservations/{failed_reservation.id}", priority="HIGH",
+                    dedupe_key=f"payment:reservation:{failed_reservation.id}:failed")
+            db.add(RealtimeEvent(user_id=failed_reservation.user_id, event_type="payment.status_changed",
+                resource_id=str(failed_reservation.id), data={"status": "FAILED", "resource_type": "reservation"}))
+            receipt.outcome = "PROCESSED"
+        else:
+            failed_topup = db.query(WalletTopUp).filter(WalletTopUp.razorpay_order_id == order_id).with_for_update().first()
+            if failed_topup and failed_topup.status != "PAID":
+                failed_topup.status = "FAILED"
+                failed_topup.razorpay_payment_id = payment_id
+                customer = db.query(User).filter_by(id=failed_topup.user_id).first()
+                if customer:
+                    create_notification(db, customer, notification_type="wallet.topup.failed", category="PAYMENT",
+                        title="Wallet top-up failed", message="Your wallet could not be topped up. Please try again.",
+                        entity_type="wallet_topup", entity_id=failed_topup.id, action_url="/customer/profile/wallet",
+                        priority="HIGH", dedupe_key=f"wallet-topup:{failed_topup.id}:failed")
+                db.add(RealtimeEvent(user_id=failed_topup.user_id, event_type="payment.status_changed",
+                    resource_id=str(failed_topup.id), data={"status": "FAILED", "resource_type": "wallet_topup"}))
+                receipt.outcome = "PROCESSED"
+            else:
+                receipt.outcome = "IGNORED"
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Razorpay failed-payment event processing failed for event %s", provider_event_id)
+            raise HTTPException(status_code=503, detail="Webhook processing failed. Please retry.")
+        return {"status": "processed" if receipt.outcome == "PROCESSED" else "ignored"}
+
     if event_type != "payment.captured":
         receipt.outcome = "IGNORED"
         db.commit()
@@ -118,7 +170,10 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
             receipt.outcome = "IGNORED"
             db.commit()
             return {"status": "ignored"}
-        if amount != int(Decimal(reservation.fee_amount) * 100):
+        expected_amount = Decimal(reservation.fee_amount)
+        if reservation.fulfillment_type == "PREORDER" and reservation.preorder_payment_method == "RAZORPAY":
+            expected_amount += Decimal(reservation.preorder_total)
+        if amount != int(expected_amount * 100):
             db.rollback()
             logger.warning("Razorpay captured event amount mismatch for event %s", provider_event_id)
             raise HTTPException(status_code=400, detail="Captured payment does not match the reservation.")
@@ -129,6 +184,8 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
                 return {"status": "review_required"}
             reservation.razorpay_payment_id = payment_id
             reservation.payment_status = "PAID"
+            if reservation.preorder_payment_method == "RAZORPAY":
+                reservation.preorder_payment_status = "PAID"
             reservation.status = "CONFIRMED"
             db.add(RealtimeEvent(user_id=reservation.user_id, restaurant_id=reservation.restaurant_id,
                 event_type="booking.updated", resource_id=str(reservation.id),
@@ -137,6 +194,12 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
             db.add(RealtimeEvent(user_id=reservation.user_id, restaurant_id=reservation.restaurant_id,
                 event_type="payment.status_changed", resource_id=str(reservation.id),
                 data={"status": "PAID", "resource_type": "reservation"}))
+            customer = db.query(User).filter_by(id=reservation.user_id).first()
+            if customer:
+                create_notification(db, customer, notification_type="payment.success", category="PAYMENT",
+                    title="Reservation payment successful", message="Your reservation payment was received.",
+                    restaurant_id=reservation.restaurant_id, entity_type="reservation", entity_id=reservation.id,
+                    action_url=f"/customer/profile/reservations/{reservation.id}", dedupe_key=f"payment:reservation:{reservation.id}:paid")
             receipt.outcome = "PROCESSED"
         else:
             receipt.outcome = "DUPLICATE_PAYMENT"
@@ -150,6 +213,8 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
             db.rollback()
             logger.exception("Razorpay event processing failed for event %s", provider_event_id)
             raise HTTPException(status_code=503, detail="Webhook processing failed. Please retry.")
+        if reservation.status == "CONFIRMED" and reservation.payment_status == "PAID":
+            send_reservation_confirmation(db, reservation.id)
         return {"status": "processed"}
 
     expected_amount = int(Decimal(topup.amount) * 100)
@@ -174,6 +239,11 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
             description="Wallet top-up", reference=payment_id))
         db.add(RealtimeEvent(user_id=topup.user_id, event_type="payment.status_changed",
             resource_id=str(topup.id), data={"status": "PAID", "resource_type": "wallet_topup"}))
+        customer = db.query(User).filter_by(id=topup.user_id).first()
+        if customer:
+            create_notification(db, customer, notification_type="wallet.topup.success", category="PAYMENT",
+                title="Wallet topped up", message="Your wallet top-up was successful.", entity_type="wallet_topup",
+                entity_id=topup.id, action_url="/customer/profile/wallet", dedupe_key=f"wallet-topup:{topup.id}:paid")
         receipt.outcome = "PROCESSED"
     else:
         receipt.outcome = "DUPLICATE_PAYMENT"

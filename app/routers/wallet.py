@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.models.user import User, UserRole
 from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction
 from app.models.realtime import RealtimeEvent
+from app.services.notifications import create_notification
 from app.routers.admin_auth import current_admin
 from app.routers.customer_auth import current_customer
 
@@ -235,6 +236,9 @@ def verify_topup(payload: WalletTopUpVerification, customer: User = Depends(curr
         description="Wallet top-up", reference=payload.razorpay_payment_id))
     db.add(RealtimeEvent(user_id=customer.id, event_type="payment.status_changed",
         resource_id=str(topup.id), data={"status": "PAID", "resource_type": "wallet_topup"}))
+    create_notification(db, customer, notification_type="wallet.topup.success", category="PAYMENT",
+        title="Wallet topped up", message="Your wallet top-up was successful.", entity_type="wallet_topup",
+        entity_id=topup.id, action_url="/customer/profile/wallet", dedupe_key=f"wallet-topup:{topup.id}:paid")
     db.commit()
     db.refresh(account)
     return {"message": "Wallet top-up successful.", "balance": float(account.balance)}

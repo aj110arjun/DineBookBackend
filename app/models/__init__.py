@@ -12,6 +12,8 @@ from app.models.reservation import Reservation, ReservationTable
 from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction
 from app.models.orders import FoodOrder, FoodOrderOffer
 from app.models.realtime import RealtimeEvent, WebhookReceipt
+from app.models.reviews import Review, ReviewFlag, ReviewReply, ReviewModerationEvent
+from app.models.notifications import Notification, NotificationPreference
 
 __all__ = [
     "AccountStatus",
@@ -38,6 +40,12 @@ __all__ = [
     "FoodOrderOffer",
     "RealtimeEvent",
     "WebhookReceipt",
+    "Review",
+    "ReviewFlag",
+    "ReviewReply",
+    "ReviewModerationEvent",
+    "Notification",
+    "NotificationPreference",
     "User",
     "UserRole",
 ]

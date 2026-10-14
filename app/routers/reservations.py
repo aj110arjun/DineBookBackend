@@ -25,6 +25,8 @@ from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.user import User
 from app.models.wallet import WalletAccount, WalletTransaction
 from app.models.realtime import RealtimeEvent
+from app.services.notifications import create_notification, notify_reservation_status
+from app.services.reservation_email import send_reservation_confirmation
 from app.routers.customer_auth import current_customer
 from app.routers.chef_auth import current_chef
 from app.routers.manager_auth import current_manager
@@ -50,6 +52,7 @@ def record_reservation_event(db: Session, item: Reservation, previous_status: st
     db.add(RealtimeEvent(user_id=item.user_id, restaurant_id=item.restaurant_id,
         event_type="booking.updated", resource_id=str(item.id),
         data=data))
+    notify_reservation_status(db, item)
 
 
 class PreorderItem(BaseModel):
@@ -81,9 +84,20 @@ class ReservationCreate(BaseModel):
     special_request: str | None = Field(default=None, max_length=1000)
     fulfillment_type: str = Field(default="TABLE_ONLY", pattern="^(TABLE_ONLY|PREORDER)$")
     payment_method: str = Field(default="WALLET", pattern="^(WALLET|RAZORPAY)$")
-    preorder_payment_method: str | None = Field(default=None, pattern="^(PAY_AT_DESK|WALLET)$")
+    preorder_payment_method: str | None = Field(default=None, pattern="^(PAY_AT_DESK|WALLET|RAZORPAY)$")
     preorder_items: list[PreorderItem] = Field(default_factory=list, max_length=50)
     offer_code: str | None = Field(default=None, max_length=40)
+
+
+def resolve_preorder_payment_method(fulfillment_type: str, selected_method: str | None,
+                                   reservation_method: str) -> str | None:
+    if fulfillment_type != "PREORDER":
+        return None
+    method = selected_method or "PAY_AT_DESK"
+    if method != "PAY_AT_DESK" and method != reservation_method:
+        raise HTTPException(status_code=422,
+            detail="Preorder payment must use the reservation payment method or be paid at the restaurant.")
+    return method
 
 
 def restaurant_for_staff(staff: User, db: Session) -> Restaurant:
@@ -125,7 +139,7 @@ def reservation_data(item: Reservation, db: Session) -> dict:
         preorder_payment_method = "WALLET" if legacy_paid else "PAY_AT_DESK"
         preorder_payment_status = "PAID" if legacy_paid else "PENDING"
     return {
-        "id": str(item.id), "restaurant_id": str(item.restaurant_id), "restaurant_name": restaurant.name if restaurant else "Restaurant",
+        "id": str(item.id), "reservation_code": f"RES-{item.id.hex[:8].upper()}", "restaurant_id": str(item.restaurant_id), "restaurant_name": restaurant.name if restaurant else "Restaurant",
         "restaurant_location": ", ".join(part for part in (restaurant.city, restaurant.state) if part) if restaurant else None,
         "restaurant_address": restaurant.address if restaurant else None,
         "restaurant_email": restaurant.email if restaurant else None,
@@ -158,7 +172,7 @@ def reservation_data(item: Reservation, db: Session) -> dict:
                          "created_at": order.created_at.isoformat() if order.created_at else None}
                         for order in food_orders],
         "tables": [{"id": str(a.table.id), "table_number": a.table.table_number,
-                    "capacity": a.table.capacity, "floor_id": str(a.table.floor_id),
+                    "capacity": a.table.capacity, "reservation_fee": float(a.table.reservation_fee), "floor_id": str(a.table.floor_id),
                     "floor_name": a.table.floor.floor_name} for a in assignments],
     }
 
@@ -306,6 +320,8 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
         raise HTTPException(status_code=422, detail="Menu items can only be added to a preorder reservation.")
     if payload.fulfillment_type == "TABLE_ONLY" and payload.offer_code:
         raise HTTPException(status_code=422, detail="Offers can only be applied to a preorder.")
+    preorder_method = resolve_preorder_payment_method(
+        payload.fulfillment_type, payload.preorder_payment_method, payload.payment_method)
     preorder_snapshot = []
     preorder_subtotal = Decimal("0.00")
     preorder_discount = Decimal("0.00")
@@ -400,9 +416,6 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
             db.rollback()
             raise HTTPException(status_code=409, detail="That table setup is no longer available. Search again to choose another option.")
         fee_amount = sum((Decimal(table.reservation_fee) for table in selected_group), Decimal("0.00"))
-        preorder_method = payload.preorder_payment_method or "PAY_AT_DESK"
-        if payload.fulfillment_type != "PREORDER":
-            preorder_method = None
         wallet_preorder_amount = preorder_total if preorder_method == "WALLET" else Decimal("0.00")
         wallet_debit_amount = wallet_preorder_amount + (fee_amount if payload.payment_method == "WALLET" else Decimal("0.00"))
         wallet_account = None
@@ -428,17 +441,18 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
         db.flush()
         checkout = None
         if payload.payment_method == "RAZORPAY":
+            razorpay_total = fee_amount + (preorder_total if preorder_method == "RAZORPAY" else Decimal("0.00"))
             provider_order = razorpay_request("POST", "orders", {
-                "amount": int(fee_amount * 100), "currency": "INR",
+                "amount": int(razorpay_total * 100), "currency": "INR",
                 "receipt": f"reservation_{item.id.hex[:32]}",
                 "notes": {"reservation_id": str(item.id), "customer_id": str(customer.id)},
             })
-            if provider_order.get("currency") != "INR" or int(provider_order.get("amount", -1)) != int(fee_amount * 100):
+            if provider_order.get("currency") != "INR" or int(provider_order.get("amount", -1)) != int(razorpay_total * 100):
                 raise HTTPException(status_code=502, detail="The provider returned an unexpected payment amount.")
             item.razorpay_order_id = provider_order["id"]
             checkout = {"key_id": settings.razorpay_key_id, "order_id": provider_order["id"],
                 "amount": provider_order["amount"], "currency": "INR", "name": "DineBook",
-                "description": f"Reservation fee · {restaurant.name}"}
+                "description": f"Reservation and preorder · {restaurant.name}" if preorder_method == "RAZORPAY" else f"Reservation fee · {restaurant.name}"}
         record_reservation_event(db, item, actor=customer)
         db.add_all([ReservationTable(reservation_id=item.id, table_id=table.id) for table in selected_group])
         if wallet_debit_amount > 0:
@@ -449,6 +463,9 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
                 transaction_type="DEBIT", description=description))
         db.commit()
         db.refresh(item)
+        if item.status == "CONFIRMED" and item.payment_status == "PAID":
+            send_reservation_confirmation(db, item.id)
+            db.refresh(item)
         result = reservation_data(item, db)
         if checkout:
             result["payment_checkout"] = checkout
@@ -481,6 +498,9 @@ def verify_reservation_payment(reservation_id: uuid.UUID, payload: ReservationPa
     if item is None:
         raise HTTPException(status_code=404, detail="Reservation not found.")
     if item.payment_status == "PAID":
+        if item.status == "CONFIRMED":
+            send_reservation_confirmation(db, item.id)
+            db.refresh(item)
         return reservation_data(item, db)
     if item.payment_method != "RAZORPAY" or item.razorpay_order_id != payload.razorpay_order_id:
         raise HTTPException(status_code=409, detail="Payment does not match this reservation.")
@@ -491,7 +511,10 @@ def verify_reservation_payment(reservation_id: uuid.UUID, payload: ReservationPa
     if not hmac.compare_digest(expected, payload.razorpay_signature):
         raise HTTPException(status_code=400, detail="Payment verification failed.")
     payment = razorpay_request("GET", f"payments/{payload.razorpay_payment_id}")
-    expected_amount = int(Decimal(item.fee_amount) * 100)
+    expected_total = Decimal(item.fee_amount)
+    if item.fulfillment_type == "PREORDER" and item.preorder_payment_method == "RAZORPAY":
+        expected_total += Decimal(item.preorder_total)
+    expected_amount = int(expected_total * 100)
     if (payment.get("order_id") != item.razorpay_order_id or payment.get("amount") != expected_amount
             or payment.get("currency") != "INR" or payment.get("status") != "captured"):
         raise HTTPException(status_code=409, detail="Payment is not captured yet. Reservation is still pending.")
@@ -499,12 +522,20 @@ def verify_reservation_payment(reservation_id: uuid.UUID, payload: ReservationPa
         raise HTTPException(status_code=409, detail="This reservation is no longer awaiting payment.")
     item.razorpay_payment_id = payload.razorpay_payment_id
     item.payment_status = "PAID"
+    if item.preorder_payment_method == "RAZORPAY":
+        item.preorder_payment_status = "PAID"
     item.status = "CONFIRMED"
     record_reservation_event(db, item, previous_status="PENDING_PAYMENT", actor=customer)
     db.add(RealtimeEvent(user_id=customer.id, restaurant_id=item.restaurant_id,
         event_type="payment.status_changed", resource_id=str(item.id),
         data={"status": "PAID", "resource_type": "reservation"}))
+    create_notification(db, customer, notification_type="payment.success", category="PAYMENT",
+        title="Reservation payment successful", message="Your reservation payment was received.",
+        restaurant_id=item.restaurant_id, entity_type="reservation", entity_id=item.id,
+        action_url=f"/customer/profile/reservations/{item.id}", dedupe_key=f"payment:reservation:{item.id}:paid")
     db.commit()
+    db.refresh(item)
+    send_reservation_confirmation(db, item.id)
     db.refresh(item)
     return reservation_data(item, db)
 
@@ -522,12 +553,25 @@ def cancel_reservation(reservation_id: uuid.UUID, customer: User = Depends(curre
     ).first()
     if active_orders:
         raise HTTPException(status_code=409, detail="Cancel or complete the linked food orders before cancelling this reservation.")
+    refund_amount = cancel_reservation_record(db, item, customer, "Reservation cancelled by customer.")
+    db.commit()
+    return {"message": "Reservation cancelled.", "wallet_refund": float(refund_amount)}
+
+
+def cancel_reservation_record(db: Session, item: Reservation, actor: User | None, reason: str) -> Decimal:
+    """Cancel an unpaid booking and release its preorder offer claim in the same transaction."""
+    if item.status not in ("PENDING_PAYMENT", "CONFIRMED"):
+        return Decimal("0.00")
     previous_status = item.status
     refund_amount = refund_wallet_reservation(db, item)
     item.status = "CANCELLED"
-    record_reservation_event(db, item, previous_status, customer)
-    db.commit()
-    return {"message": "Reservation cancelled.", "wallet_refund": float(refund_amount)}
+    item.status_reason = reason[:500]
+    if item.payment_status != "PAID":
+        item.payment_status = "FAILED"
+    if item.preorder_payment_status == "PENDING":
+        item.preorder_payment_status = "CANCELLED"
+    record_reservation_event(db, item, previous_status, actor, reason)
+    return refund_amount
 
 
 def refund_wallet_reservation(db: Session, item: Reservation) -> Decimal:
@@ -685,6 +729,8 @@ def manager_confirm_payment(reservation_id: uuid.UUID, manager: User = Depends(c
     item.status = "CONFIRMED"
     record_reservation_event(db, item, previous_status, manager)
     db.commit()
+    db.refresh(item)
+    send_reservation_confirmation(db, item.id)
     db.refresh(item)
     return reservation_data(item, db)
 
