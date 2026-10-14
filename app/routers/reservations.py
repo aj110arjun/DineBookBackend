@@ -5,20 +5,21 @@ import hmac
 import json
 from itertools import combinations
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.database import get_db
 from app.core.config import settings
 from app.models.dining import DiningTable, RestaurantFloor
 from app.models.menu import Category, Food, FoodVariant
-from app.models.orders import FoodOrder
+from app.models.orders import FoodOrder, FoodOrderOffer, OfferRedemption
 from app.models.reservation import Reservation, ReservationTable
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.user import User
@@ -82,6 +83,7 @@ class ReservationCreate(BaseModel):
     payment_method: str = Field(default="WALLET", pattern="^(WALLET|RAZORPAY)$")
     preorder_payment_method: str | None = Field(default=None, pattern="^(PAY_AT_DESK|WALLET)$")
     preorder_items: list[PreorderItem] = Field(default_factory=list, max_length=50)
+    offer_code: str | None = Field(default=None, max_length=40)
 
 
 def restaurant_for_staff(staff: User, db: Session) -> Restaurant:
@@ -144,6 +146,7 @@ def reservation_data(item: Reservation, db: Session) -> dict:
         "preorder_due_at_desk": float(item.preorder_total or 0) if item.fulfillment_type == "PREORDER" and preorder_payment_method == "PAY_AT_DESK" and preorder_payment_status == "PENDING" else 0,
         "fulfillment_type": item.fulfillment_type, "payment_method": item.payment_method,
         "preorder_items": item.preorder_items or [], "preorder_total": float(item.preorder_total or 0),
+        "preorder_discount": float(item.preorder_discount or 0), "preorder_offer_code": item.preorder_offer_code,
         "special_request": item.special_request,
         "food_orders": [{"id": str(order.id), "status": order.status,
                          "status_reason": order.status_reason, "payment_status": order.payment_status,
@@ -291,8 +294,6 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
     now = datetime.now(RESTAURANT_TIMEZONE)
     if payload.reservation_date <= now.date():
         raise HTTPException(status_code=422, detail="Reservations must be made at least one day in advance.")
-    if payload.fulfillment_type != "TABLE_ONLY" or payload.preorder_items:
-        raise HTTPException(status_code=422, detail="Food orders are handled by the restaurant manager at reception.")
     restaurant = db.query(Restaurant).filter(Restaurant.id == payload.restaurant_id, Restaurant.status == RestaurantStatus.APPROVED).first()
     if restaurant is None:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
@@ -303,8 +304,12 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
         raise HTTPException(status_code=422, detail="Add at least one menu item to your preorder.")
     if payload.fulfillment_type == "TABLE_ONLY" and payload.preorder_items:
         raise HTTPException(status_code=422, detail="Menu items can only be added to a preorder reservation.")
+    if payload.fulfillment_type == "TABLE_ONLY" and payload.offer_code:
+        raise HTTPException(status_code=422, detail="Offers can only be applied to a preorder.")
     preorder_snapshot = []
-    preorder_total = Decimal("0.00")
+    preorder_subtotal = Decimal("0.00")
+    preorder_discount = Decimal("0.00")
+    preorder_offer = None
     if payload.preorder_items:
         variant_ids = [entry.variant_id for entry in payload.preorder_items]
         if len(set(variant_ids)) != len(variant_ids):
@@ -322,12 +327,66 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
             food = variant.food
             unit_price = Decimal(variant.price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             line_total = (unit_price * entry.quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            preorder_total += line_total
+            preorder_subtotal += line_total
             preorder_snapshot.append({"variant_id": str(variant.id), "food_name": food.name,
                 "description": food.description,
                 "image_url": food.image.image_url if food.image else None,
                 "variant_name": variant.name, "quantity": entry.quantity,
                 "unit_price": float(unit_price), "line_total": float(line_total)})
+    preorder_subtotal = preorder_subtotal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if payload.offer_code:
+        preorder_offer = db.query(FoodOrderOffer).filter(
+            FoodOrderOffer.restaurant_id == restaurant.id,
+            func.upper(FoodOrderOffer.code) == payload.offer_code.strip().upper(),
+        ).with_for_update().first()
+        if preorder_offer is None:
+            raise HTTPException(status_code=422, detail="Offer code was not found.")
+        if not preorder_offer.is_active:
+            raise HTTPException(status_code=422, detail="Offer is inactive.")
+        now_utc = datetime.now(timezone.utc)
+        starts_at = preorder_offer.starts_at.replace(tzinfo=timezone.utc) if preorder_offer.starts_at and preorder_offer.starts_at.tzinfo is None else preorder_offer.starts_at
+        ends_at = preorder_offer.ends_at.replace(tzinfo=timezone.utc) if preorder_offer.ends_at and preorder_offer.ends_at.tzinfo is None else preorder_offer.ends_at
+        if starts_at and starts_at > now_utc:
+            raise HTTPException(status_code=422, detail="Offer is not active yet.")
+        if ends_at and ends_at < now_utc:
+            raise HTTPException(status_code=422, detail="Offer has expired.")
+        if preorder_offer.max_uses is not None and preorder_offer.uses >= preorder_offer.max_uses:
+            raise HTTPException(status_code=422, detail="Offer has been fully redeemed.")
+        customer_uses = db.query(OfferRedemption.id).filter(
+            OfferRedemption.offer_id == preorder_offer.id,
+            OfferRedemption.customer_id == customer.id,
+            OfferRedemption.status == "APPLIED",
+        ).count()
+        customer_claim_ids = [reservation_id for (reservation_id,) in db.query(Reservation.id).filter(
+            Reservation.preorder_offer_id == preorder_offer.id,
+            Reservation.user_id == customer.id,
+            Reservation.status.in_(("PENDING_PAYMENT", "CONFIRMED", "SEATED")),
+        ).all()]
+        customer_claims = sum(1 for claim_id in customer_claim_ids if not db.query(FoodOrder.id).filter(
+            FoodOrder.idempotency_key == uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(claim_id)),
+        ).first())
+        if preorder_offer.per_customer_limit is not None and customer_uses + customer_claims >= preorder_offer.per_customer_limit:
+            raise HTTPException(status_code=422, detail="You have reached the redemption limit.")
+        eligible_subtotal = Decimal("0.00")
+        for entry in preorder_snapshot:
+            variant = variants_by_id[uuid.UUID(entry["variant_id"])]
+            matches = preorder_offer.applicability == "RESTAURANT" or (preorder_offer.applicability == "ITEMS" and str(variant.food.id) in preorder_offer.eligible_food_ids) or (preorder_offer.applicability == "CATEGORIES" and str(variant.food.category_id) in preorder_offer.eligible_category_ids)
+            if matches:
+                eligible_subtotal += Decimal(str(entry["line_total"]))
+        eligible_subtotal = eligible_subtotal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if eligible_subtotal <= 0:
+            raise HTTPException(status_code=422, detail="This offer does not apply to the selected items.")
+        if eligible_subtotal < Decimal(preorder_offer.minimum_subtotal):
+            raise HTTPException(status_code=422, detail="Eligible items do not meet the minimum subtotal.")
+        if preorder_offer.discount_type == "PERCENTAGE":
+            preorder_discount = (eligible_subtotal * Decimal(preorder_offer.discount_percent) / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if preorder_offer.max_discount is not None:
+                preorder_discount = min(preorder_discount, Decimal(preorder_offer.max_discount))
+        else:
+            preorder_discount = min(eligible_subtotal, Decimal(preorder_offer.discount_percent))
+        preorder_discount = min(preorder_discount, eligible_subtotal).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        preorder_offer.uses += 1  # Claim the limited redemption while the preorder is held by this reservation.
+    preorder_total = (preorder_subtotal - preorder_discount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     try:
         requested_table_ids = payload.table_ids or ([payload.table_id] if payload.table_id else [])
         if not requested_table_ids or len(set(requested_table_ids)) != len(requested_table_ids):
@@ -344,14 +403,15 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
         preorder_method = payload.preorder_payment_method or "PAY_AT_DESK"
         if payload.fulfillment_type != "PREORDER":
             preorder_method = None
-        amount_due_now = fee_amount + (preorder_total if preorder_method == "WALLET" else Decimal("0.00"))
+        wallet_preorder_amount = preorder_total if preorder_method == "WALLET" else Decimal("0.00")
+        wallet_debit_amount = wallet_preorder_amount + (fee_amount if payload.payment_method == "WALLET" else Decimal("0.00"))
         wallet_account = None
-        if payload.payment_method == "WALLET":
+        if wallet_debit_amount > 0:
             wallet_account = db.query(WalletAccount).filter(WalletAccount.user_id == customer.id).with_for_update().first()
-            if wallet_account is None or Decimal(wallet_account.balance) < amount_due_now:
+            if wallet_account is None or Decimal(wallet_account.balance) < wallet_debit_amount:
                 db.rollback()
-                raise HTTPException(status_code=409, detail="Your wallet balance must cover the reservation fee and any preorder food you choose to pay now.")
-            wallet_account.balance = Decimal(wallet_account.balance) - amount_due_now
+                raise HTTPException(status_code=409, detail="Your wallet balance must cover the wallet payments selected for this booking.")
+            wallet_account.balance = Decimal(wallet_account.balance) - wallet_debit_amount
         item = Reservation(user_id=customer.id, restaurant_id=restaurant.id,
             reservation_date=payload.reservation_date, start_time=payload.start_time, end_time=end,
             number_of_guests=payload.number_of_guests, special_request=payload.special_request,
@@ -361,6 +421,8 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
             preorder_payment_method=preorder_method,
             fulfillment_type=payload.fulfillment_type, payment_method=payload.payment_method,
             preorder_items=preorder_snapshot or None, preorder_total=preorder_total,
+            preorder_discount=preorder_discount, preorder_offer_id=preorder_offer.id if preorder_offer else None,
+            preorder_offer_code=preorder_offer.code if preorder_offer else None,
             fee_amount=fee_amount)
         db.add(item)
         db.flush()
@@ -379,9 +441,12 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
                 "description": f"Reservation fee · {restaurant.name}"}
         record_reservation_event(db, item, actor=customer)
         db.add_all([ReservationTable(reservation_id=item.id, table_id=table.id) for table in selected_group])
-        if payload.payment_method == "WALLET":
-            db.add(WalletTransaction(user_id=customer.id, reservation_id=item.id, amount=-amount_due_now,
-                transaction_type="DEBIT", description=f"Reservation at {restaurant.name}"))
+        if wallet_debit_amount > 0:
+            description = f"Reservation at {restaurant.name}"
+            if preorder_method == "WALLET":
+                description += " including preorder"
+            db.add(WalletTransaction(user_id=customer.id, reservation_id=item.id, amount=-wallet_debit_amount,
+                transaction_type="DEBIT", description=description))
         db.commit()
         db.refresh(item)
         result = reservation_data(item, db)
@@ -473,6 +538,13 @@ def refund_wallet_reservation(db: Session, item: Reservation) -> Decimal:
     ).first()
     if existing_refund:
         return Decimal("0.00")
+    if item.preorder_offer_id:
+        preorder_key = uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(item.id))
+        queued_order = db.query(FoodOrder.id).filter(FoodOrder.idempotency_key == preorder_key).first()
+        if queued_order is None:
+            offer = db.query(FoodOrderOffer).filter(FoodOrderOffer.id == item.preorder_offer_id).with_for_update().first()
+            if offer is not None:
+                offer.uses = max(0, offer.uses - 1)
     booking_time = item.created_at
     if booking_time is not None and booking_time.tzinfo is None:
         booking_time = booking_time.replace(tzinfo=timezone.utc)

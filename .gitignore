@@ -7,3 +7,6 @@ __pycache__/
 uploads/
 scripts/
 tests/
+!tests/
+tests/*
+!tests/test_offer_discounts.py
