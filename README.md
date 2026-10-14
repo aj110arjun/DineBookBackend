@@ -104,6 +104,20 @@ For local webhook tests, use Razorpay Test mode and a publicly reachable staging
 | Chef portal | Login/session/logout, required first-login password change, restaurant menu details, and assigned restaurant floors |
 | Platform admin | Login/session/logout, review manager applications and documents, list/inspect restaurants and menus, suspend/resume restaurants, inspect floors/tables |
 
+### Reviews and moderation
+
+Reviews target a restaurant (one review per customer per restaurant) and are tied to a completed customer food order for eligibility. The API uses the existing role sessions:
+
+| Portal | Endpoints |
+| --- | --- |
+| Customer | `GET/POST /api/customer/reviews`, `PATCH /api/customer/reviews/{review_id}`, `POST /api/customer/reviews/{review_id}/flags` |
+| Public | `GET /api/reviews/restaurants/{restaurant_id}` (published reviews and published owner replies only) |
+| Chef | `GET /api/chef/reviews` (assigned restaurant only) |
+| Restaurant manager | `GET /api/manager/reviews`, `PUT /api/manager/reviews/{review_id}/reply` |
+| Platform admin | `GET /api/admin/reviews`, `POST /api/admin/reviews/{review_id}/actions` |
+
+Moderation actions are `APPROVE`, `REJECT`, `HIDE`, `RESTORE`, and `DISMISS_FLAG`. Rejection, hiding, and restoration require a reason. Review and flag state are stored independently, and review status changes create an immutable audit event. Apply migration `0031_reviews_moderation` before deploying.
+
 ## Offers
 
 Migration `0029_offer_applicability` extends the existing `food_order_offers` table and creates `offer_redemptions`. Existing coupon-backed orders are copied into the ledger, with cancelled/rejected orders marked `REVERSED`; the offer usage counters are reconciled from active redemptions. Order totals already store the charged subtotal, discount, and total, so later offer edits do not reprice historical orders.
