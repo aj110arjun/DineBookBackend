@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/events", tags=["realtime events"])
 logger = logging.getLogger(__name__)
 POLL_SECONDS = 2
 MAX_EVENTS_PER_POLL = 100
-DELIVERABLE_EVENTS = {"order.status_changed", "booking.updated", "payment.status_changed", "notification.created"}
+DELIVERABLE_EVENTS = {"order.status_changed", "booking.updated", "payment.status_changed", "notification.created", "wallet.transfer_sent", "wallet.transfer_received"}
 MAX_STREAMS_PER_PROCESS = 200
 _stream_slots = BoundedSemaphore(MAX_STREAMS_PER_PROCESS)
 

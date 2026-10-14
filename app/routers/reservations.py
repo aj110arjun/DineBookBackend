@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from sqlalchemy import String, and_, cast, func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.database import get_db
@@ -27,6 +27,7 @@ from app.models.wallet import WalletAccount, WalletTransaction
 from app.models.realtime import RealtimeEvent
 from app.services.notifications import create_notification, notify_reservation_status
 from app.services.reservation_email import send_reservation_confirmation
+from app.services.restaurant_wallet import record_restaurant_payment, reverse_restaurant_payment
 from app.routers.customer_auth import current_customer
 from app.routers.chef_auth import current_chef
 from app.routers.manager_auth import current_manager
@@ -34,6 +35,7 @@ from app.routers.operating_hours import effective_periods
 
 customer_router = APIRouter(prefix="/api/customer/reservations", tags=["reservations"])
 manager_router = APIRouter(prefix="/api/manager/reservations", tags=["manager reservations"])
+manager_calendar_router = APIRouter(prefix="/api/manager/calendar", tags=["manager calendar"])
 chef_router = APIRouter(prefix="/api/chef/reservations", tags=["chef reservations"])
 BLOCKING = ("PENDING_PAYMENT", "CONFIRMED", "SEATED")
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
@@ -127,11 +129,11 @@ class ReservationPaymentVerification(BaseModel):
     razorpay_signature: str = Field(min_length=32, max_length=256)
 
 
-def reservation_data(item: Reservation, db: Session) -> dict:
+def reservation_data(item: Reservation, db: Session, include_orders: bool = True) -> dict:
     customer = db.query(User).filter(User.id == item.user_id).first()
     restaurant = db.query(Restaurant).filter(Restaurant.id == item.restaurant_id).first()
     assignments = db.query(ReservationTable).options(joinedload(ReservationTable.table).joinedload(DiningTable.floor)).filter(ReservationTable.reservation_id == item.id).all()
-    food_orders = db.query(FoodOrder).filter(FoodOrder.reservation_id == item.id).order_by(FoodOrder.created_at.asc()).all()
+    food_orders = db.query(FoodOrder).filter(FoodOrder.reservation_id == item.id).order_by(FoodOrder.created_at.asc()).all() if include_orders else []
     preorder_payment_method = item.preorder_payment_method
     preorder_payment_status = item.preorder_payment_status
     if item.fulfillment_type == "PREORDER" and preorder_payment_status is None:
@@ -430,7 +432,9 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
             number_of_guests=payload.number_of_guests, special_request=payload.special_request,
             status="CONFIRMED" if payload.payment_method == "WALLET" else "PENDING_PAYMENT",
             payment_status="PAID" if payload.payment_method == "WALLET" else "PENDING",
+            paid_at=datetime.now(timezone.utc) if payload.payment_method == "WALLET" else None,
             preorder_payment_status=("PAID" if preorder_method == "WALLET" else "PENDING") if preorder_method else None,
+            preorder_paid_at=datetime.now(timezone.utc) if preorder_method == "WALLET" else None,
             preorder_payment_method=preorder_method,
             fulfillment_type=payload.fulfillment_type, payment_method=payload.payment_method,
             preorder_items=preorder_snapshot or None, preorder_total=preorder_total,
@@ -461,6 +465,12 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
                 description += " including preorder"
             db.add(WalletTransaction(user_id=customer.id, reservation_id=item.id, amount=-wallet_debit_amount,
                 transaction_type="DEBIT", description=description))
+        if payload.payment_method == "WALLET":
+            record_restaurant_payment(db, restaurant.id, fee_amount,
+                f"Reservation RES-{item.id.hex[:8].upper()} · DineBook wallet", f"customer-payment:reservation:{item.id}:fee")
+        if preorder_method == "WALLET":
+            record_restaurant_payment(db, restaurant.id, preorder_total,
+                f"Preorder RES-{item.id.hex[:8].upper()} · DineBook wallet", f"customer-payment:reservation:{item.id}:preorder")
         db.commit()
         db.refresh(item)
         if item.status == "CONFIRMED" and item.payment_status == "PAID":
@@ -522,8 +532,14 @@ def verify_reservation_payment(reservation_id: uuid.UUID, payload: ReservationPa
         raise HTTPException(status_code=409, detail="This reservation is no longer awaiting payment.")
     item.razorpay_payment_id = payload.razorpay_payment_id
     item.payment_status = "PAID"
+    item.paid_at = datetime.now(timezone.utc)
+    record_restaurant_payment(db, item.restaurant_id, Decimal(item.fee_amount),
+        f"Reservation RES-{item.id.hex[:8].upper()} · Razorpay", f"customer-payment:reservation:{item.id}:fee")
     if item.preorder_payment_method == "RAZORPAY":
         item.preorder_payment_status = "PAID"
+        item.preorder_paid_at = item.paid_at
+        record_restaurant_payment(db, item.restaurant_id, Decimal(item.preorder_total or 0),
+            f"Preorder RES-{item.id.hex[:8].upper()} · Razorpay", f"customer-payment:reservation:{item.id}:preorder")
     item.status = "CONFIRMED"
     record_reservation_event(db, item, previous_status="PENDING_PAYMENT", actor=customer)
     db.add(RealtimeEvent(user_id=customer.id, restaurant_id=item.restaurant_id,
@@ -615,7 +631,189 @@ def refund_wallet_reservation(db: Session, item: Reservation) -> Decimal:
     db.add(WalletTransaction(user_id=item.user_id, reservation_id=item.id, amount=refund_amount,
         transaction_type="REFUND", description="Wallet refund for cancelled reservation",
         reference=f"reservation:{item.id}"))
+    reverse_restaurant_payment(db, item.restaurant_id, refund_amount,
+        f"Customer wallet refund · RES-{item.id.hex[:8].upper()}", f"customer-refund:reservation:{item.id}")
     return refund_amount
+
+
+@manager_calendar_router.get("/summary")
+def manager_calendar_summary(
+    start_date: date,
+    end_date: date,
+    manager: User = Depends(current_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if end_date < start_date or (end_date - start_date).days > 40:
+        raise HTTPException(status_code=422, detail="Choose a calendar range of up to 41 days.")
+    restaurant = restaurant_for_staff(manager, db)
+    days: dict[str, dict] = {}
+
+    reservation_rows = db.query(
+        Reservation.reservation_date, Reservation.status, func.count(Reservation.id),
+        func.coalesce(func.sum(Reservation.number_of_guests), 0),
+    ).filter(
+        Reservation.restaurant_id == restaurant.id,
+        Reservation.reservation_date.between(start_date, end_date),
+    ).group_by(Reservation.reservation_date, Reservation.status).all()
+    reservation_tones = {
+        "CONFIRMED": "confirmed", "SEATED": "confirmed", "PENDING_PAYMENT": "pending",
+        "CANCELLED": "cancelled", "REJECTED": "cancelled", "NO_SHOW": "cancelled",
+        "COMPLETED": "completed",
+    }
+    order_tones = {
+        "PLACED": "pending", "ACCEPTED": "confirmed", "PREPARING": "confirmed",
+        "READY": "completed", "COMPLETED": "completed", "CANCELLED": "cancelled",
+        "REJECTED": "cancelled",
+    }
+    for reservation_day, status_value, count, guest_count in reservation_rows:
+        key = reservation_day.isoformat()
+        day = days.setdefault(key, {"reservations_count": 0, "orders_count": 0, "guest_count": 0, "tones": []})
+        day["reservations_count"] += count
+        day["guest_count"] += int(guest_count or 0)
+        tone = reservation_tones.get(status_value, "pending")
+        if tone not in day["tones"]:
+            day["tones"].append(tone)
+
+    local_start = datetime.combine(start_date, time.min, tzinfo=RESTAURANT_TIMEZONE).astimezone(timezone.utc)
+    local_end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=RESTAURANT_TIMEZONE).astimezone(timezone.utc)
+    order_rows = db.query(
+        FoodOrder.status, FoodOrder.created_at, Reservation.reservation_date,
+    ).outerjoin(Reservation, Reservation.id == FoodOrder.reservation_id).filter(
+        FoodOrder.restaurant_id == restaurant.id,
+        or_(
+            Reservation.reservation_date.between(start_date, end_date),
+            and_(Reservation.id.is_(None), FoodOrder.created_at >= local_start, FoodOrder.created_at < local_end),
+        ),
+    ).all()
+    for status_value, created_at, reservation_day in order_rows:
+        created_at_utc = created_at.replace(tzinfo=timezone.utc) if created_at.tzinfo is None else created_at
+        order_day = reservation_day or created_at_utc.astimezone(RESTAURANT_TIMEZONE).date()
+        key = order_day.isoformat()
+        day = days.setdefault(key, {"reservations_count": 0, "orders_count": 0, "guest_count": 0, "tones": []})
+        day["orders_count"] += 1
+        tone = order_tones.get(status_value, "pending")
+        if tone not in day["tones"]:
+            day["tones"].append(tone)
+
+    tables = db.query(DiningTable.id, DiningTable.table_number).filter(
+        DiningTable.restaurant_id == restaurant.id,
+    ).order_by(DiningTable.table_number).all()
+    return {
+        "days": days,
+        "tables": [{"id": str(table_id), "table_number": table_number} for table_id, table_number in tables],
+    }
+
+
+@manager_calendar_router.get("/activities")
+def manager_calendar_activities(
+    day: date,
+    page: int = Query(default=1, ge=1),
+    order_page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=50),
+    search: str = Query(default="", max_length=120),
+    status_filter: str | None = Query(default=None, alias="status"),
+    table_id: uuid.UUID | None = None,
+    guest_filter: str | None = None,
+    sort: str = Query(default="time", pattern="^(time|guests)$"),
+    manager: User = Depends(current_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.routers.orders import serialize as serialize_order
+
+    restaurant = restaurant_for_staff(manager, db)
+    search_value = search.strip()
+    normalized_id = search_value.replace("-", "").lower()
+    is_reservation_id_lookup = len(normalized_id) >= 6 and all(char in "0123456789abcdef" for char in normalized_id)
+
+    reservation_query = db.query(Reservation).filter(Reservation.restaurant_id == restaurant.id)
+    if not is_reservation_id_lookup:
+        reservation_query = reservation_query.filter(Reservation.reservation_date == day)
+    else:
+        reservation_query = reservation_query.filter(
+            func.replace(cast(Reservation.id, String), "-", "").ilike(f"{normalized_id}%")
+        )
+    if status_filter:
+        reservation_statuses = {"CONFIRMED", "PENDING_PAYMENT", "CANCELLED", "REJECTED", "NO_SHOW", "COMPLETED", "SEATED"}
+        order_statuses = {"PLACED", "ACCEPTED", "PREPARING", "READY", "COMPLETED", "CANCELLED", "REJECTED"}
+        matching_statuses = []
+        if status_filter in reservation_statuses:
+            matching_statuses.append(Reservation.status == status_filter)
+        if status_filter in order_statuses:
+            matching_statuses.append(Reservation.id.in_(
+                db.query(FoodOrder.reservation_id).filter(
+                    FoodOrder.restaurant_id == restaurant.id,
+                    FoodOrder.status == status_filter,
+                    FoodOrder.reservation_id.is_not(None),
+                )
+            ))
+        reservation_query = reservation_query.filter(or_(*matching_statuses)) if matching_statuses else reservation_query.filter(False)
+    if table_id:
+        reservation_query = reservation_query.filter(Reservation.assignments.any(ReservationTable.table_id == table_id))
+    if guest_filter:
+        if guest_filter == "6+":
+            reservation_query = reservation_query.filter(Reservation.number_of_guests >= 6)
+        elif guest_filter.isdigit():
+            reservation_query = reservation_query.filter(Reservation.number_of_guests == int(guest_filter))
+    if search_value and not is_reservation_id_lookup:
+        reservation_query = reservation_query.outerjoin(User, User.id == Reservation.user_id).filter(or_(
+            User.name.ilike(f"%{search_value}%"), User.email.ilike(f"%{search_value}%"),
+            cast(Reservation.id, String).ilike(f"%{search_value}%"),
+            cast(Reservation.preorder_items, String).ilike(f"%{search_value}%"),
+            Reservation.id.in_(db.query(ReservationTable.reservation_id).join(DiningTable, DiningTable.id == ReservationTable.table_id).filter(DiningTable.table_number.ilike(f"%{search_value}%"))),
+            Reservation.id.in_(db.query(FoodOrder.reservation_id).filter(
+                FoodOrder.restaurant_id == restaurant.id,
+                FoodOrder.reservation_id.is_not(None),
+                or_(cast(FoodOrder.items, String).ilike(f"%{search_value}%"), cast(FoodOrder.id, String).ilike(f"%{search_value}%")),
+            )),
+        ))
+    reservation_total = reservation_query.count()
+    if sort == "guests":
+        reservation_query = reservation_query.order_by(Reservation.number_of_guests.asc(), Reservation.start_time.asc())
+    else:
+        reservation_query = reservation_query.order_by(Reservation.start_time.asc())
+    reservation_rows = reservation_query.offset((page - 1) * page_size).limit(page_size).all()
+    reservation_items = [reservation_data(item, db, include_orders=False) for item in reservation_rows]
+    reservation_lookup_date = reservation_items[0]["reservation_date"] if is_reservation_id_lookup and reservation_items else None
+
+    local_start = datetime.combine(day, time.min, tzinfo=RESTAURANT_TIMEZONE).astimezone(timezone.utc)
+    local_end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=RESTAURANT_TIMEZONE).astimezone(timezone.utc)
+    order_query = db.query(FoodOrder).outerjoin(User, User.id == FoodOrder.customer_id).filter(
+        FoodOrder.restaurant_id == restaurant.id,
+        FoodOrder.reservation_id.is_(None),
+        FoodOrder.created_at >= local_start,
+        FoodOrder.created_at < local_end,
+    )
+    if status_filter:
+        order_query = order_query.filter(FoodOrder.status == status_filter)
+    if table_id:
+        order_query = order_query.filter(FoodOrder.table_id == table_id)
+    if search_value:
+        order_query = order_query.filter(or_(
+            User.name.ilike(f"%{search_value}%"), User.email.ilike(f"%{search_value}%"),
+            FoodOrder.guest_name.ilike(f"%{search_value}%"), cast(FoodOrder.items, String).ilike(f"%{search_value}%"),
+            cast(FoodOrder.id, String).ilike(f"%{search_value}%"),
+        ))
+    orders_total = order_query.count()
+    order_rows = order_query.order_by(FoodOrder.created_at.asc()).offset((order_page - 1) * page_size).limit(page_size).all()
+
+    return {
+        "date": day.isoformat(),
+        "reservation_id_lookup": is_reservation_id_lookup,
+        "reservation_lookup_date": reservation_lookup_date,
+        "reservations": {
+            "items": reservation_items,
+            "total": reservation_total,
+            "guest_count": int(reservation_query.order_by(None).offset(None).limit(None).with_entities(func.coalesce(func.sum(Reservation.number_of_guests), 0)).scalar() or 0),
+            "page": page,
+            "page_size": page_size,
+        },
+        "orders": {
+            "items": [serialize_order(order, db) for order in order_rows],
+            "total": orders_total,
+            "page": order_page,
+            "page_size": page_size,
+        },
+    }
 
 
 @manager_router.get("")
@@ -722,10 +920,13 @@ def manager_confirm_payment(reservation_id: uuid.UUID, manager: User = Depends(c
         raise HTTPException(status_code=409, detail="Only reservations awaiting payment can be confirmed.")
     previous_status = item.status
     # This is a manager attestation of payment received outside DineBook.
+    item.payment_method = "PAY_AT_DESK"
     item.payment_status = "PAID"
+    item.paid_at = datetime.now(timezone.utc)
     if item.fulfillment_type == "PREORDER":
         item.preorder_payment_method = "PAY_AT_DESK"
         item.preorder_payment_status = "PAID"
+        item.preorder_paid_at = item.paid_at
     item.status = "CONFIRMED"
     record_reservation_event(db, item, previous_status, manager)
     db.commit()
@@ -748,12 +949,14 @@ def manager_confirm_preorder_payment(reservation_id: uuid.UUID, manager: User = 
     if item.status not in ("CONFIRMED", "SEATED"):
         raise HTTPException(status_code=409, detail="Only an active reservation can have its preorder payment recorded.")
     item.preorder_payment_status = "PAID"
+    item.preorder_paid_at = datetime.now(timezone.utc)
     preorder_order = db.query(FoodOrder).filter(
         FoodOrder.reservation_id == item.id,
         FoodOrder.idempotency_key == uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(item.id)),
     ).with_for_update().first()
     if preorder_order is not None and preorder_order.status not in {"CANCELLED", "REJECTED"}:
         preorder_order.payment_status = "PAID"
+        preorder_order.paid_at = item.preorder_paid_at
         db.add(RealtimeEvent(user_id=preorder_order.customer_id, restaurant_id=preorder_order.restaurant_id,
             event_type="order.status_changed", resource_id=str(preorder_order.id),
             data={"status": preorder_order.status, "payment_status": preorder_order.payment_status,

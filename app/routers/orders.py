@@ -18,6 +18,7 @@ from app.models.user import User
 from app.models.wallet import WalletAccount, WalletTransaction
 from app.models.realtime import RealtimeEvent
 from app.services.notifications import notify_order_status
+from app.services.restaurant_wallet import record_restaurant_payment, reverse_restaurant_payment
 from app.routers.admin_auth import current_admin
 from app.routers.chef_auth import current_chef
 from app.routers.customer_auth import current_customer
@@ -349,6 +350,7 @@ def create_reserved_order(reservation_id: uuid.UUID, payload: CheckoutInput, cus
             offer_id=offer.id if offer else None, offer_code=code, items=snapshots,
             subtotal=subtotal, discount_amount=discount, total=total, status="PLACED",
             payment_method=payload.payment_method, payment_status=payment_status,
+            paid_at=datetime.now(timezone.utc) if payment_status == "PAID" else None,
             customer_note=payload.customer_note)
         db.add(order)
         db.flush()
@@ -359,6 +361,8 @@ def create_reserved_order(reservation_id: uuid.UUID, payload: CheckoutInput, cus
         if payload.payment_method == "WALLET":
             db.add(WalletTransaction(user_id=customer.id, amount=-total, transaction_type="DEBIT",
                 description=f"Food order at {restaurant.name}", reference=f"food-order:{order.id}"))
+            record_restaurant_payment(db, restaurant.id, total,
+                f"Food order ORD-{order.id.hex[:8].upper()} · DineBook wallet", f"customer-payment:order:{order.id}")
         db.commit()
         db.refresh(order)
         return serialize(order, db)
@@ -528,6 +532,7 @@ def manager_queue_reservation_preorder(reservation_id: uuid.UUID,
             status="PLACED",
             payment_method=payment_method or "PAY_AT_DESK",
             payment_status=payment_status,
+            paid_at=datetime.now(timezone.utc) if payment_status == "PAID" else None,
             customer_note="Reservation preorder",
         )
         db.add(order)
@@ -585,6 +590,9 @@ def cancel_customer_order(order_id: uuid.UUID, payload: CustomerOrderCancellatio
         account.balance = Decimal(account.balance) + Decimal(row.total)
         db.add(WalletTransaction(user_id=customer.id, amount=Decimal(row.total), transaction_type="REFUND",
             description="Wallet refund for cancelled food order", reference=f"food-order:{row.id}"))
+        if row.payment_method == "WALLET":
+            reverse_restaurant_payment(db, row.restaurant_id, Decimal(row.total),
+                f"Customer wallet refund · ORD-{row.id.hex[:8].upper()}", f"customer-refund:order:{row.id}")
         row.payment_status = "REFUNDED"
     previous_status = row.status
     reverse_offer_redemption(db, row)
@@ -624,6 +632,8 @@ def update_status(order_id: uuid.UUID, next_status: str, allowed: dict, staff: U
                 db.add(WalletTransaction(user_id=row.customer_id, reservation_id=row.reservation_id,
                     amount=Decimal(row.total), transaction_type="REFUND",
                     description="Wallet refund for cancelled reservation preorder", reference=f"food-order:{row.id}"))
+                reverse_restaurant_payment(db, row.restaurant_id, Decimal(row.total),
+                    f"Customer wallet refund · preorder ORD-{row.id.hex[:8].upper()}", f"customer-refund:order:{row.id}")
             if reservation is not None:
                 reservation.preorder_payment_status = "REFUNDED"
             row.payment_status = "REFUNDED"
@@ -635,6 +645,9 @@ def update_status(order_id: uuid.UUID, next_status: str, allowed: dict, staff: U
             row.payment_status = "REFUNDED"
             db.add(WalletTransaction(user_id=row.customer_id, amount=Decimal(row.total), transaction_type="REFUND",
                 description="Wallet refund for cancelled food order", reference=f"food-order:{row.id}"))
+            if row.payment_method == "WALLET":
+                reverse_restaurant_payment(db, row.restaurant_id, Decimal(row.total),
+                    f"Customer wallet refund · ORD-{row.id.hex[:8].upper()}", f"customer-refund:order:{row.id}")
     row.status = next_status
     now = datetime.now(timezone.utc)
     if next_status == "ACCEPTED":
@@ -731,6 +744,7 @@ def manager_mark_order_paid(order_id: uuid.UUID, manager: User = Depends(current
     if row.payment_method != "PAY_AT_DESK" or row.status in {"CANCELLED", "REJECTED"}:
         raise HTTPException(status_code=409, detail="This order cannot be marked paid.")
     row.payment_status = "PAID"
+    row.paid_at = datetime.now(timezone.utc)
     if row.table_id is not None:
         table = db.query(DiningTable).filter(DiningTable.id == row.table_id).with_for_update().first()
         if table is not None and table.status == "occupied":
@@ -740,6 +754,7 @@ def manager_mark_order_paid(order_id: uuid.UUID, manager: User = Depends(current
         if reservation is not None:
             reservation.preorder_payment_method = "PAY_AT_DESK"
             reservation.preorder_payment_status = "PAID"
+            reservation.preorder_paid_at = row.paid_at
     record_order_event(db, row, actor=manager)
     db.commit()
     db.refresh(row)
