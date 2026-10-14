@@ -138,6 +138,14 @@ Alembic migrations are in `alembic/versions`. They cover shared accounts and ver
 
 Migration `0023_single_food_image` keeps the earliest food-level image for each dish, promotes the earliest variant image only when no food-level image exists, and enforces one image record per dish. Other legacy image records are detached from the menu, but their Cloudinary files are not automatically removed. Newly created order and preorder snapshots include the food image URL; historical snapshots remain unchanged.
 
+## Notifications
+
+Migration `0032_notifications` creates recipient-scoped persistent notifications and optional per-category preferences. Apply it with `../venv/bin/alembic upgrade head` before using the notification APIs. The APIs use the existing HTTP-only `dinebook_access_token` cookie and are available at `GET /api/notifications` (with `limit`, `offset`, `unread`, `category`, and `priority` filters), `GET /api/notifications/unread-count`, `GET /api/notifications/{id}`, `PATCH /api/notifications/{id}/read`, `PATCH /api/notifications/read-all`, `DELETE /api/notifications/{id}`, and `GET/PATCH /api/notifications/preferences`.
+
+Live updates use the existing cookie-authenticated database-backed SSE endpoint, `GET /api/events/stream`; no WebSocket or Redis dependency is required. Notification records and their recipient-only SSE wake-ups are written in the same SQL transaction as supported order, reservation, payment, review, and approval changes. The SSE cursor allows clients to resume after disconnects; the REST API remains the source of truth. The React portals reconnect and refresh notifications after a new event or connection recovery.
+
+Reminder scheduling, staff account lifecycle alerts, payment reconciliation incidents, and the complete breadth of operational/admin events are not yet wired to a persistent job queue or event source. No scheduler or Redis dependency is configured in this project, so upcoming reservation reminders are not generated automatically.
+
 Use the same `DATABASE_URL` for Alembic and the API. From `Backend/src`:
 
 ```bash

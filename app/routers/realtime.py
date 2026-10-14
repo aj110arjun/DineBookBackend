@@ -24,6 +24,7 @@ router = APIRouter(prefix="/api/events", tags=["realtime events"])
 logger = logging.getLogger(__name__)
 POLL_SECONDS = 2
 MAX_EVENTS_PER_POLL = 100
+DELIVERABLE_EVENTS = {"order.status_changed", "booking.updated", "payment.status_changed", "notification.created"}
 MAX_STREAMS_PER_PROCESS = 200
 _stream_slots = BoundedSemaphore(MAX_STREAMS_PER_PROCESS)
 
@@ -112,6 +113,9 @@ async def event_stream(request: Request, after: int = 0) -> StreamingResponse:
                     events = await asyncio.to_thread(_read_events, user_id, restaurant_id, cursor)
                     poll_delay = POLL_SECONDS
                     for row in events:
+                        if row.event_type not in DELIVERABLE_EVENTS:
+                            cursor = row.id
+                            continue
                         # Only fields explicitly approved for realtime delivery are serialized.
                         safe_data = {
                             "event_id": str(row.event_id),

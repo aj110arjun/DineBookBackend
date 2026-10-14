@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.models.user import AccountStatus, User, UserRole
+from app.services.notifications import create_notification
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.restaurant_document import RestaurantDocument
 from app.models.restaurant_hours import RestaurantHours
@@ -273,6 +274,11 @@ def approve_manager(
     manager.is_active = True
     restaurant.status = RestaurantStatus.APPROVED
 
+    create_notification(db, manager, notification_type="restaurant.approved", category="APPROVAL",
+        title="Restaurant application approved", message=f"{restaurant.name} is approved and ready to manage.",
+        restaurant_id=restaurant.id, entity_type="restaurant", entity_id=restaurant.id,
+        action_url="/manager/dashboard", dedupe_key=f"restaurant:{restaurant.id}:approved")
+
     db.commit()
     db.refresh(manager)
 
@@ -329,6 +335,11 @@ def reject_manager(
     manager.status = AccountStatus.REJECTED
     manager.is_active = False
     restaurant.status = RestaurantStatus.REJECTED
+
+    create_notification(db, manager, notification_type="restaurant.rejected", category="APPROVAL",
+        title="Restaurant application update", message="Your restaurant application was not approved.",
+        restaurant_id=restaurant.id, entity_type="restaurant", entity_id=restaurant.id,
+        action_url="/manager/pending", priority="HIGH", dedupe_key=f"restaurant:{restaurant.id}:rejected")
 
     db.commit()
     db.refresh(manager)

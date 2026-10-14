@@ -17,6 +17,7 @@ from app.routers.customer_auth import current_customer
 from app.routers.chef_auth import current_chef
 from app.routers.manager_auth import current_manager
 from app.routers.admin_auth import current_admin
+from app.services.notifications import create_notification
 
 customer_router = APIRouter(prefix="/api/customer/reviews", tags=["customer reviews"])
 public_router = APIRouter(prefix="/api/reviews", tags=["reviews"])
@@ -86,6 +87,18 @@ def create_review(payload: ReviewPayload, customer: User = Depends(current_custo
             raise HTTPException(422, "Food item was not included in this order.")
     review = Review(customer_id=customer.id, restaurant_id=order.restaurant_id, order_id=order.id, food_id=payload.food_id, rating=payload.rating, content=content)
     db.add(review)
+    db.flush()
+    create_notification(db, customer, notification_type="review.submitted", category="REVIEW",
+        title="Review submitted", message="Your review was submitted successfully.", restaurant_id=order.restaurant_id,
+        entity_type="review", entity_id=review.id, action_url="/customer/profile/reviews",
+        dedupe_key=f"review:{review.id}:submitted:customer")
+    restaurant = db.query(Restaurant).filter_by(id=order.restaurant_id).first()
+    manager = db.query(User).filter_by(id=restaurant.manager_id).first() if restaurant else None
+    if manager:
+        create_notification(db, manager, notification_type="review.submitted", category="REVIEW",
+            title="New customer review", message="A customer left a review for your restaurant.",
+            restaurant_id=order.restaurant_id, entity_type="review", entity_id=review.id,
+            action_url="/manager/reviews", dedupe_key=f"review:{review.id}:submitted")
     try:
         db.commit()
     except IntegrityError:
@@ -125,6 +138,12 @@ def flag_review(review_id: uuid.UUID, payload: FlagPayload, customer: User = Dep
         raise HTTPException(409, "You cannot report your own review.")
     flag = ReviewFlag(review_id=review_id, customer_id=customer.id, reason=payload.reason, explanation=clean(payload.explanation) if payload.explanation else None)
     db.add(flag)
+    db.flush()
+    for admin in db.query(User).filter(User.role == "ADMIN", User.is_active.is_(True)).all():
+        create_notification(db, admin, notification_type="review.flagged", category="REVIEW",
+            title="Review flagged for moderation", message="A customer report requires moderation.",
+            restaurant_id=target.restaurant_id, entity_type="review", entity_id=target.id,
+            action_url="/admin/reviews", priority="HIGH", dedupe_key=f"review-flag:{flag.id}:admin:{admin.id}")
     try: db.commit()
     except IntegrityError:
         db.rollback(); raise HTTPException(409, "You have already reported this review.")
@@ -182,6 +201,13 @@ def save_reply(review_id: uuid.UUID, payload: ReplyPayload, manager: User = Depe
         reply.content = content
     else:
         reply = ReviewReply(review_id=review.id, restaurant_id=restaurant.id, manager_id=manager.id, content=content); db.add(reply)
+    db.flush()
+    customer = db.query(User).filter_by(id=review.customer_id).first()
+    if customer:
+        create_notification(db, customer, notification_type="review.replied", category="REVIEW",
+            title="The restaurant replied to your review", message=f"{restaurant.name} responded to your review.",
+            restaurant_id=restaurant.id, entity_type="review", entity_id=review.id,
+            action_url="/customer/profile/reviews", dedupe_key=f"review:{review.id}:reply:{reply.id if reply.id else 'updated'}")
     db.commit(); db.refresh(reply)
     return {"review_id": str(review.id), "content": reply.content, "updated_at": reply.updated_at.isoformat()}
 
@@ -226,6 +252,13 @@ def moderate(review_id: uuid.UUID, payload: ActionPayload, admin: User = Depends
         raise HTTPException(409, "This review is already approved and has no pending reports.")
     review.status = target
     db.add(ReviewModerationEvent(review_id=review.id, admin_id=admin.id, action=action, previous_status=previous, new_status=target, reason=reason or None))
+    customer = db.query(User).filter_by(id=review.customer_id).first()
+    if customer:
+        create_notification(db, customer, notification_type="review.moderated", category="REVIEW",
+            title="Review moderation update", message=f"Your review status is now {target.lower()}.",
+            restaurant_id=review.restaurant_id, entity_type="review", entity_id=review.id,
+            action_url="/customer/profile/reviews", priority="HIGH",
+            dedupe_key=f"review:{review.id}:moderated:{target}")
     if action in {"APPROVE", "REJECT", "HIDE", "RESTORE"}:
         for flag in db.query(ReviewFlag).filter(ReviewFlag.review_id == review.id, ReviewFlag.status == "PENDING").with_for_update().all():
             flag.status = "RESOLVED"; flag.resolved_at = datetime.now(timezone.utc); flag.resolution_note = f"Review {target.lower()}ed by platform moderation."

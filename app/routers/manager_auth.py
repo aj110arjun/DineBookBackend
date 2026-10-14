@@ -36,6 +36,7 @@ from app.models.restaurant_document import (
 )
 from app.models.restaurant_hours import RestaurantHours
 from app.models.user import AccountStatus, User, UserRole
+from app.services.notifications import create_notification
 from app.models.user import EmailVerificationCode
 
 
@@ -614,6 +615,13 @@ async def register_manager(
                 )
             )
 
+        db.flush()
+        for admin in db.query(User).filter(User.role == UserRole.ADMIN, User.is_active.is_(True)).all():
+            create_notification(db, admin, notification_type="restaurant.approval_requested", category="APPROVAL",
+                title="Restaurant approval requested", message=f"{restaurant.name} submitted an onboarding application.",
+                restaurant_id=restaurant.id, entity_type="restaurant", entity_id=restaurant.id,
+                action_url="/admin/requests", priority="HIGH",
+                dedupe_key=f"restaurant:{restaurant.id}:approval-requested:{admin.id}")
         db.commit()
 
     except HTTPException:
