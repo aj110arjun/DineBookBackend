@@ -9,11 +9,12 @@ from app.models.menu import Category, Food, FoodImage, FoodVariant
 from app.models.user import AccountStatus, EmailVerificationCode, User, UserRole
 from app.models.dining import DiningTable, Floor, RestaurantFloor
 from app.models.reservation import Reservation, ReservationTable
-from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction
+from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction, WalletTransfer
 from app.models.orders import FoodOrder, FoodOrderOffer
 from app.models.realtime import RealtimeEvent, WebhookReceipt
 from app.models.reviews import Review, ReviewFlag, ReviewReply, ReviewModerationEvent
 from app.models.notifications import Notification, NotificationPreference
+from app.models.revenue import PlatformCommission, PlatformCommissionPayout, PlatformRevenueSettings
 
 __all__ = [
     "AccountStatus",
@@ -36,6 +37,7 @@ __all__ = [
     "WalletAccount",
     "WalletTopUp",
     "WalletTransaction",
+    "WalletTransfer",
     "FoodOrder",
     "FoodOrderOffer",
     "RealtimeEvent",
@@ -46,6 +48,9 @@ __all__ = [
     "ReviewModerationEvent",
     "Notification",
     "NotificationPreference",
+    "PlatformRevenueSettings",
+    "PlatformCommission",
+    "PlatformCommissionPayout",
     "User",
     "UserRole",
 ]

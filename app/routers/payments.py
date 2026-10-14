@@ -73,9 +73,11 @@ def list_payments(db: Session, restaurant_id: uuid.UUID, *, q: str | None, payme
     query = db.query(records)
     if q and q.strip():
         term = f"%{q.strip()}%"
+        displayed_id_suffix = q.strip().split("-")[-1] if q.strip().upper().startswith(("TXN-", "ORD-", "RES-")) else ""
         query = query.filter(or_(records.c.id.ilike(term), records.c.order_id.ilike(term),
             records.c.reservation_id.ilike(term), records.c.razorpay_order_id.ilike(term),
-            records.c.razorpay_payment_id.ilike(term)))
+            records.c.razorpay_payment_id.ilike(term),
+            records.c.id.ilike(f"%{displayed_id_suffix}%") if displayed_id_suffix else literal(False)))
     if payment_status:
         query = query.filter(records.c.status == payment_status)
     if transaction_type:

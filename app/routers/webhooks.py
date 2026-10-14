@@ -19,6 +19,7 @@ from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction
 from app.models.reservation import Reservation
 from app.services.notifications import create_notification
 from app.services.reservation_email import send_reservation_confirmation
+from app.services.restaurant_wallet import record_restaurant_payment
 from app.routers.reservations import cancel_reservation_record
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
@@ -122,9 +123,10 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
                 failed_topup.razorpay_payment_id = payment_id
                 customer = db.query(User).filter_by(id=failed_topup.user_id).first()
                 if customer:
+                    wallet_url = "/customer/profile/wallet" if customer.role.value == "CUSTOMER" else "/manager/revenue" if customer.role.value == "MANAGER" else "/chef/revenue"
                     create_notification(db, customer, notification_type="wallet.topup.failed", category="PAYMENT",
                         title="Wallet top-up failed", message="Your wallet could not be topped up. Please try again.",
-                        entity_type="wallet_topup", entity_id=failed_topup.id, action_url="/customer/profile/wallet",
+                        entity_type="wallet_topup", entity_id=failed_topup.id, action_url=wallet_url,
                         priority="HIGH", dedupe_key=f"wallet-topup:{failed_topup.id}:failed")
                 db.add(RealtimeEvent(user_id=failed_topup.user_id, event_type="payment.status_changed",
                     resource_id=str(failed_topup.id), data={"status": "FAILED", "resource_type": "wallet_topup"}))
@@ -184,8 +186,14 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
                 return {"status": "review_required"}
             reservation.razorpay_payment_id = payment_id
             reservation.payment_status = "PAID"
+            reservation.paid_at = datetime.now(timezone.utc)
+            record_restaurant_payment(db, reservation.restaurant_id, Decimal(reservation.fee_amount),
+                f"Reservation RES-{reservation.id.hex[:8].upper()} · Razorpay", f"customer-payment:reservation:{reservation.id}:fee")
             if reservation.preorder_payment_method == "RAZORPAY":
                 reservation.preorder_payment_status = "PAID"
+                reservation.preorder_paid_at = reservation.paid_at
+                record_restaurant_payment(db, reservation.restaurant_id, Decimal(reservation.preorder_total or 0),
+                    f"Preorder RES-{reservation.id.hex[:8].upper()} · Razorpay", f"customer-payment:reservation:{reservation.id}:preorder")
             reservation.status = "CONFIRMED"
             db.add(RealtimeEvent(user_id=reservation.user_id, restaurant_id=reservation.restaurant_id,
                 event_type="booking.updated", resource_id=str(reservation.id),
@@ -241,9 +249,10 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
             resource_id=str(topup.id), data={"status": "PAID", "resource_type": "wallet_topup"}))
         customer = db.query(User).filter_by(id=topup.user_id).first()
         if customer:
+            wallet_url = "/customer/profile/wallet" if customer.role.value == "CUSTOMER" else "/manager/revenue" if customer.role.value == "MANAGER" else "/chef/revenue"
             create_notification(db, customer, notification_type="wallet.topup.success", category="PAYMENT",
                 title="Wallet topped up", message="Your wallet top-up was successful.", entity_type="wallet_topup",
-                entity_id=topup.id, action_url="/customer/profile/wallet", dedupe_key=f"wallet-topup:{topup.id}:paid")
+                entity_id=topup.id, action_url=wallet_url, dedupe_key=f"wallet-topup:{topup.id}:paid")
         receipt.outcome = "PROCESSED"
     else:
         receipt.outcome = "DUPLICATE_PAYMENT"

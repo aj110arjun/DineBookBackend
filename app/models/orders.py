@@ -92,6 +92,7 @@ class FoodOrder(Base):
     __table_args__ = (
         UniqueConstraint("customer_id", "idempotency_key", name="uq_food_orders_customer_idempotency_key"),
         Index("ix_food_orders_restaurant_status_created", "restaurant_id", "status", "created_at"),
+        Index("ix_food_orders_restaurant_created", "restaurant_id", "created_at"),
         Index("ix_food_orders_customer_created", "customer_id", "created_at"),
         Index("ix_food_orders_reservation_id", "reservation_id"),
     )
@@ -111,6 +112,7 @@ class FoodOrder(Base):
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="PLACED")
     payment_method: Mapped[str] = mapped_column(String(20), nullable=False, default="PAY_AT_DESK")
     payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     customer_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     preparation_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
