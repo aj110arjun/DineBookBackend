@@ -104,6 +104,18 @@ For local webhook tests, use Razorpay Test mode and a publicly reachable staging
 | Chef portal | Login/session/logout, required first-login password change, restaurant menu details, and assigned restaurant floors |
 | Platform admin | Login/session/logout, review manager applications and documents, list/inspect restaurants and menus, suspend/resume restaurants, inspect floors/tables |
 
+## Offers
+
+Migration `0029_offer_applicability` extends the existing `food_order_offers` table and creates `offer_redemptions`. Existing coupon-backed orders are copied into the ledger, with cancelled/rejected orders marked `REVERSED`; the offer usage counters are reconciled from active redemptions. Order totals already store the charged subtotal, discount, and total, so later offer edits do not reprice historical orders.
+
+Managers use `GET /api/manager/orders/offers` (search/status/sort filters and offset pagination), `GET /api/manager/orders/offers/{id}`, `GET /api/manager/orders/offers/summary`, `POST /api/manager/orders/offers`, `PUT /api/manager/orders/offers/{id}`, and `PATCH /api/manager/orders/offers/{id}?is_active=false`. `GET /api/manager/orders/offers/{id}/redemptions` returns scoped redemption history. Item and category IDs are checked against the manager's restaurant. There is no hard-delete operation.
+
+Customers can discover offers with `GET /api/customer/orders/offers?restaurant_id={id}` and validate a proposed code using `POST /api/customer/orders/offers/validate` with `{ "reservation_id": "uuid", "offer_code": "SAVE10", "items": [{"variant_id":"uuid","quantity":2}] }`. Validation does not reserve capacity. At order creation, the server rereads current menu prices and validates the offer again. `offer_code` on the existing order checkout request remains the application mechanism.
+
+Platform administrators have read-only `GET /api/admin/orders/offers`, `GET /api/admin/orders/offers/{id}`, `GET /api/admin/orders/offers/statistics`, `GET /api/admin/orders/offer-redemptions`, and `GET /api/admin/orders/offer-redemptions/{id}` endpoints. They do not receive offer mutation endpoints. Responses identify customers only by internal ID.
+
+Only one offer applies to an order. Restaurant scope counts all merchandise; item/category scope counts only matching menu items. An item in multiple selected categories is counted once because order lines are unique by variant and matching is boolean. Minimum spend is checked against that eligible merchandise subtotal. Percentage discounts are capped by `max_discount`; fixed discounts and all other discounts are capped at the eligible subtotal. Taxes and delivery charges are not part of this food-order total in the current checkout model, so this module does not invent a new tax order. Offer timestamps must include a timezone; the UI sends UTC instants. Checkout locks the offer row, checks global and per-customer limits, inserts the order and redemption in one database transaction, and is idempotent through the existing customer checkout key. Customer or staff cancellation/rejection marks the redemption reversed and releases capacity. Payment-provider reversals remain governed by the existing payment workflow.
+
 Food images accept JPEG, PNG, or WebP files up to 10 MB. The API verifies the declared media type against the image signature, scopes uploads and deletion to the manager's restaurant, and stores one Cloudinary URL plus provider ID per dish in `food_images`. Food menu responses use `image_url`; variant responses contain variant data only.
 
 ## Database and migrations
