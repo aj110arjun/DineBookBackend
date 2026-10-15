@@ -121,6 +121,8 @@ def build_reservation_invoice_pdf(
     totals: list[tuple[str, Decimal]] = [("Subtotal", subtotal)]
     if preorder_discount:
         totals.append((f"Offer discount · {item.preorder_offer_code or 'Offer'}", -preorder_discount))
+    if has_preorder and Decimal(item.preorder_tax_amount or 0):
+        totals.append((f"GST ({item.preorder_tax_percent}%)", Decimal(item.preorder_tax_amount)))
     totals.extend([("Total", total), ("Amount paid", paid), ("Amount due", due)])
     for label, value in totals:
         y -= 16

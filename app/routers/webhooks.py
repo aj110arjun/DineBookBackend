@@ -123,7 +123,9 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
                 failed_topup.razorpay_payment_id = payment_id
                 customer = db.query(User).filter_by(id=failed_topup.user_id).first()
                 if customer:
-                    wallet_url = "/customer/profile/wallet" if customer.role.value == "CUSTOMER" else "/manager/revenue" if customer.role.value == "MANAGER" else "/chef/revenue"
+                    wallet_url = ("/customer/profile/wallet" if customer.role.value == "CUSTOMER" else
+                        "/manager/revenue" if customer.role.value == "MANAGER" else
+                        "/chef/revenue" if customer.role.value == "CHEF" else "/admin/revenue")
                     create_notification(db, customer, notification_type="wallet.topup.failed", category="PAYMENT",
                         title="Wallet top-up failed", message="Your wallet could not be topped up. Please try again.",
                         entity_type="wallet_topup", entity_id=failed_topup.id, action_url=wallet_url,
@@ -249,7 +251,9 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
             resource_id=str(topup.id), data={"status": "PAID", "resource_type": "wallet_topup"}))
         customer = db.query(User).filter_by(id=topup.user_id).first()
         if customer:
-            wallet_url = "/customer/profile/wallet" if customer.role.value == "CUSTOMER" else "/manager/revenue" if customer.role.value == "MANAGER" else "/chef/revenue"
+            wallet_url = ("/customer/profile/wallet" if customer.role.value == "CUSTOMER" else
+                "/manager/revenue" if customer.role.value == "MANAGER" else
+                "/chef/revenue" if customer.role.value == "CHEF" else "/admin/revenue")
             create_notification(db, customer, notification_type="wallet.topup.success", category="PAYMENT",
                 title="Wallet topped up", message="Your wallet top-up was successful.", entity_type="wallet_topup",
                 entity_id=topup.id, action_url=wallet_url, dedupe_key=f"wallet-topup:{topup.id}:paid")

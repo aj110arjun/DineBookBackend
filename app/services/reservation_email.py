@@ -8,6 +8,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.core.email import send_branded_email
+from app.db.database import SessionLocal
 from app.models.dining import DiningTable
 from app.models.reservation import Reservation, ReservationTable
 from app.models.restaurant import Restaurant
@@ -15,6 +16,15 @@ from app.models.user import User
 from app.services.reservation_invoice_pdf import build_reservation_invoice_pdf
 
 logger = logging.getLogger(__name__)
+
+
+def send_reservation_confirmation_in_background(reservation_id: uuid.UUID) -> None:
+    """Send a reservation confirmation with a task-owned database session."""
+    db = SessionLocal()
+    try:
+        send_reservation_confirmation(db, reservation_id)
+    finally:
+        db.close()
 
 
 def _money(value: Decimal | float | int | None) -> str:
@@ -34,7 +44,8 @@ def _invoice_totals(item: Reservation) -> tuple[bool, Decimal, Decimal, Decimal,
     has_preorder = item.fulfillment_type == "PREORDER" and bool(item.preorder_items)
     preorder_amount = Decimal(item.preorder_total or 0)
     preorder_discount = Decimal(item.preorder_discount or 0)
-    preorder_subtotal = preorder_amount + preorder_discount
+    preorder_tax = Decimal(item.preorder_tax_amount or 0)
+    preorder_subtotal = preorder_amount - preorder_tax + preorder_discount
     preorder_paid = has_preorder and item.preorder_payment_status == "PAID"
     due = Decimal("0") if preorder_paid or not has_preorder else preorder_amount
     paid = Decimal(item.fee_amount or 0) + (preorder_amount if preorder_paid else Decimal("0"))
@@ -49,6 +60,8 @@ def _invoice_totals(item: Reservation) -> tuple[bool, Decimal, Decimal, Decimal,
     ]
     if item.preorder_offer_code:
         rows.append(("Offer applied", f"{item.preorder_offer_code} · discount INR {preorder_discount:.2f}"))
+    if has_preorder and preorder_tax:
+        rows.append((f"GST ({item.preorder_tax_percent}%)", f"INR {preorder_tax:.2f}"))
     return has_preorder, preorder_amount, preorder_discount, preorder_subtotal, paid, due, rows
 
 

@@ -108,6 +108,8 @@ class FoodOrder(Base):
     items: Mapped[list] = mapped_column(JSON().with_variant(JSONB, "postgresql"), nullable=False)
     subtotal: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     discount_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0.00"))
+    tax_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, default=Decimal("0.00"))
+    tax_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0.00"))
     total: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="PLACED")
     payment_method: Mapped[str] = mapped_column(String(20), nullable=False, default="PAY_AT_DESK")

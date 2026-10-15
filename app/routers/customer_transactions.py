@@ -175,6 +175,7 @@ def customer_transaction_details(
         return {
             "id": str(item.id), "transaction_type": transaction_type, "description": "Food order payment",
             "amount": float(item.total), "subtotal": float(item.subtotal), "discount_amount": float(item.discount_amount or 0),
+            "tax_percent": float(item.tax_percent or 0), "tax_amount": float(item.tax_amount or 0),
             "items": item.items, "payment_method": item.payment_method, "status": item.payment_status,
             "created_at": item.created_at.isoformat() if item.created_at else None, "provider_reference": None,
             "provider_order_reference": None, "related_id": str(item.reservation_id) if item.reservation_id else str(item.id),

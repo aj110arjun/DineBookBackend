@@ -10,7 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import String, and_, cast, func, or_
 from sqlalchemy.orm import Session, joinedload
@@ -26,7 +26,7 @@ from app.models.user import User
 from app.models.wallet import WalletAccount, WalletTransaction
 from app.models.realtime import RealtimeEvent
 from app.services.notifications import create_notification, notify_reservation_status
-from app.services.reservation_email import send_reservation_confirmation
+from app.services.reservation_email import send_reservation_confirmation, send_reservation_confirmation_in_background
 from app.services.restaurant_wallet import record_restaurant_payment, reverse_restaurant_payment
 from app.routers.customer_auth import current_customer
 from app.routers.chef_auth import current_chef
@@ -163,9 +163,13 @@ def reservation_data(item: Reservation, db: Session, include_orders: bool = True
         "fulfillment_type": item.fulfillment_type, "payment_method": item.payment_method,
         "preorder_items": item.preorder_items or [], "preorder_total": float(item.preorder_total or 0),
         "preorder_discount": float(item.preorder_discount or 0), "preorder_offer_code": item.preorder_offer_code,
+        "preorder_tax_percent": float(item.preorder_tax_percent or 0),
+        "preorder_tax_amount": float(item.preorder_tax_amount or 0),
         "special_request": item.special_request,
         "food_orders": [{"id": str(order.id), "status": order.status,
                          "status_reason": order.status_reason, "payment_status": order.payment_status,
+                         "subtotal": float(order.subtotal), "discount_amount": float(order.discount_amount or 0),
+                         "tax_percent": float(order.tax_percent or 0), "tax_amount": float(order.tax_amount or 0),
                          "total": float(order.total), "items": order.items or [],
                          "accepted_at": order.accepted_at.isoformat() if order.accepted_at else None,
                          "preparation_started_at": order.preparation_started_at.isoformat() if order.preparation_started_at else None,
@@ -404,7 +408,10 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
             preorder_discount = min(eligible_subtotal, Decimal(preorder_offer.discount_percent))
         preorder_discount = min(preorder_discount, eligible_subtotal).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         preorder_offer.uses += 1  # Claim the limited redemption while the preorder is held by this reservation.
-    preorder_total = (preorder_subtotal - preorder_discount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    preorder_taxable_total = (preorder_subtotal - preorder_discount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    preorder_tax_percent = Decimal(settings.order_tax_percent).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    preorder_tax_amount = (preorder_taxable_total * preorder_tax_percent / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    preorder_total = (preorder_taxable_total + preorder_tax_amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     try:
         requested_table_ids = payload.table_ids or ([payload.table_id] if payload.table_id else [])
         if not requested_table_ids or len(set(requested_table_ids)) != len(requested_table_ids):
@@ -438,7 +445,9 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
             preorder_payment_method=preorder_method,
             fulfillment_type=payload.fulfillment_type, payment_method=payload.payment_method,
             preorder_items=preorder_snapshot or None, preorder_total=preorder_total,
-            preorder_discount=preorder_discount, preorder_offer_id=preorder_offer.id if preorder_offer else None,
+            preorder_discount=preorder_discount, preorder_tax_percent=preorder_tax_percent if preorder_snapshot else Decimal("0.00"),
+            preorder_tax_amount=preorder_tax_amount if preorder_snapshot else Decimal("0.00"),
+            preorder_offer_id=preorder_offer.id if preorder_offer else None,
             preorder_offer_code=preorder_offer.code if preorder_offer else None,
             fee_amount=fee_amount)
         db.add(item)
@@ -503,14 +512,14 @@ def get_my_reservation(reservation_id: uuid.UUID, customer: User = Depends(curre
 
 @customer_router.post("/{reservation_id}/payment/verify")
 def verify_reservation_payment(reservation_id: uuid.UUID, payload: ReservationPaymentVerification,
+                               background_tasks: BackgroundTasks,
                                customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> dict:
     item = db.query(Reservation).filter(Reservation.id == reservation_id, Reservation.user_id == customer.id).with_for_update().first()
     if item is None:
         raise HTTPException(status_code=404, detail="Reservation not found.")
     if item.payment_status == "PAID":
         if item.status == "CONFIRMED":
-            send_reservation_confirmation(db, item.id)
-            db.refresh(item)
+            background_tasks.add_task(send_reservation_confirmation_in_background, item.id)
         return reservation_data(item, db)
     if item.payment_method != "RAZORPAY" or item.razorpay_order_id != payload.razorpay_order_id:
         raise HTTPException(status_code=409, detail="Payment does not match this reservation.")
@@ -551,8 +560,7 @@ def verify_reservation_payment(reservation_id: uuid.UUID, payload: ReservationPa
         action_url=f"/customer/profile/reservations/{item.id}", dedupe_key=f"payment:reservation:{item.id}:paid")
     db.commit()
     db.refresh(item)
-    send_reservation_confirmation(db, item.id)
-    db.refresh(item)
+    background_tasks.add_task(send_reservation_confirmation_in_background, item.id)
     return reservation_data(item, db)
 
 
@@ -609,12 +617,15 @@ def refund_wallet_reservation(db: Session, item: Reservation) -> Decimal:
     if booking_time is not None and booking_time.tzinfo is None:
         booking_time = booking_time.replace(tzinfo=timezone.utc)
     within_refund_window = booking_time is not None and datetime.now(timezone.utc) <= booking_time + timedelta(days=1)
-    fee_refundable = item.payment_method == "WALLET" and item.payment_status == "PAID" and within_refund_window
-    preorder_paid_from_wallet = item.preorder_payment_status == "PAID" and item.preorder_payment_method == "WALLET"
+    digitally_paid_methods = {"WALLET", "RAZORPAY"}
+    fee_refundable = (item.payment_method in digitally_paid_methods and item.payment_status == "PAID"
+                      and within_refund_window)
+    preorder_paid_digitally = (item.preorder_payment_status == "PAID"
+                               and item.preorder_payment_method in digitally_paid_methods)
     # Legacy preorder records used the reservation payment fields for both charges.
     legacy_preorder_paid = (item.preorder_payment_status is None and item.fulfillment_type == "PREORDER"
                             and item.payment_method == "WALLET" and item.payment_status == "PAID")
-    preorder_refundable = preorder_paid_from_wallet or legacy_preorder_paid
+    preorder_refundable = preorder_paid_digitally or legacy_preorder_paid
     refund_amount = (Decimal(item.fee_amount) if fee_refundable else Decimal("0.00"))
     if preorder_refundable:
         refund_amount += Decimal(item.preorder_total or 0)

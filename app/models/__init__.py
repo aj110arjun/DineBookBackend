@@ -15,12 +15,14 @@ from app.models.realtime import RealtimeEvent, WebhookReceipt
 from app.models.reviews import Review, ReviewFlag, ReviewReply, ReviewModerationEvent
 from app.models.notifications import Notification, NotificationPreference
 from app.models.revenue import PlatformCommission, PlatformCommissionPayout, PlatformRevenueSettings
+from app.models.restaurant_staff import RestaurantStaff
 
 __all__ = [
     "AccountStatus",
     "EmailVerificationCode",
     "Restaurant",
     "RestaurantStatus",
+    "RestaurantStaff",
     "RestaurantDocument",
     "RestaurantDocumentType",
     "RestaurantHours",
