@@ -23,7 +23,7 @@ from app.routers import (
 from app.routers.dining import admin_router as admin_dining_router, chef_router as chef_dining_router, customer_router as customer_dining_router, manager_router as manager_dining_router
 from app.routers.reservations import customer_router as customer_reservations_router, manager_router as manager_reservations_router, manager_calendar_router, chef_router as chef_reservations_router
 from app.routers.customer_auth import session_router
-from app.routers.wallet import customer_router as customer_wallet_router, admin_router as admin_wallet_router, manager_router as manager_wallet_router
+from app.routers.wallet import customer_router as customer_wallet_router, admin_router as admin_wallet_router, manager_router as manager_wallet_router, chef_wallet_router
 from app.routers.orders import customer_router as customer_orders_router, customer_reservation_orders_router, manager_router as manager_orders_router, manager_reservation_orders_router, chef_router as chef_orders_router, chef_reservation_orders_router, admin_router as admin_orders_router
 from app.routers.webhooks import router as webhooks_router
 from app.routers.payments import manager_router as manager_payments_router, admin_router as admin_payments_router
@@ -100,7 +100,17 @@ async def security_middleware(request: Request, call_next):
     response = await call_next(request)
     apply_security_headers(response, request_id, (time.perf_counter() - started_at) * 1000)
     if path.startswith("/api/"):
-        response.headers.setdefault("Cache-Control", "no-store")
+        # Public restaurant discovery data is requested repeatedly during
+        # navigation. Allow a short private browser cache while keeping all
+        # account, order, payment, and manager/admin responses uncached.
+        is_public_restaurant_read = (
+            method in {"GET", "HEAD"}
+            and (path == "/api/customer/restaurants" or path.startswith("/api/customer/restaurants/"))
+        )
+        if is_public_restaurant_read:
+            response.headers.setdefault("Cache-Control", "private, max-age=15")
+        else:
+            response.headers.setdefault("Cache-Control", "no-store")
     return response
 
 app.add_middleware(
@@ -145,6 +155,7 @@ app.include_router(manager_reviews_router)
 app.include_router(admin_reviews_router)
 app.include_router(admin_wallet_router)
 app.include_router(manager_wallet_router)
+app.include_router(chef_wallet_router)
 app.include_router(admin_revenue_router)
 app.include_router(manager_revenue_router)
 app.include_router(chef_revenue_router)

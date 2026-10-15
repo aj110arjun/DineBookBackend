@@ -9,6 +9,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 
 from app.db.database import get_db
+from app.core.config import settings
 from app.models.dining import DiningTable
 from app.models.menu import Category, Food, FoodVariant
 from app.models.orders import FoodOrder, FoodOrderOffer, OfferRedemption
@@ -67,6 +68,12 @@ def reverse_offer_redemption(db: Session, order: FoodOrder) -> None:
         offer.uses = max(0, offer.uses - 1)
     redemption.status = "REVERSED"
 CHEF_TRANSITIONS = {"ACCEPTED": {"PREPARING"}, "PREPARING": {"READY"}}
+
+
+@customer_router.get("/tax-rate")
+def customer_order_tax_rate(customer: User = Depends(current_customer)) -> dict:
+    """Expose the server-configured rate so checkout can preview the authoritative tax."""
+    return {"tax_percent": float(settings.order_tax_percent)}
 
 
 def utc_instant(value: datetime | None) -> datetime | None:
@@ -244,6 +251,7 @@ def serialize(order: FoodOrder, db: Session) -> dict:
         "customer_email": customer.email if customer else None,
         "items": order.items, "subtotal": float(order.subtotal),
         "discount_amount": float(order.discount_amount), "offer_code": order.offer_code,
+        "tax_percent": float(order.tax_percent or 0), "tax_amount": float(order.tax_amount or 0),
         "total": float(order.total), "status": order.status,
         "payment_method": order.payment_method, "payment_status": order.payment_status,
         "customer_note": order.customer_note, "created_at": order.created_at.isoformat(),
@@ -337,7 +345,10 @@ def create_reserved_order(reservation_id: uuid.UUID, payload: CheckoutInput, cus
                 raise HTTPException(status_code=422, detail="This offer is invalid, expired, exhausted, or does not match your eligible cart subtotal.")
             discount = calculate_offer_discount(offer, eligible_subtotal)
             offer.uses += 1
-        total = max(Decimal("0.00"), subtotal - discount).quantize(CENT, rounding=ROUND_HALF_UP)
+        taxable_total = max(Decimal("0.00"), subtotal - discount).quantize(CENT, rounding=ROUND_HALF_UP)
+        tax_percent = Decimal(settings.order_tax_percent).quantize(CENT, rounding=ROUND_HALF_UP)
+        tax_amount = (taxable_total * tax_percent / Decimal("100")).quantize(CENT, rounding=ROUND_HALF_UP)
+        total = (taxable_total + tax_amount).quantize(CENT, rounding=ROUND_HALF_UP)
         payment_status = "PENDING"
         if payload.payment_method == "WALLET":
             account = db.query(WalletAccount).filter(WalletAccount.user_id == customer.id).with_for_update().first()
@@ -348,7 +359,8 @@ def create_reserved_order(reservation_id: uuid.UUID, payload: CheckoutInput, cus
         order = FoodOrder(customer_id=customer.id, reservation_id=reservation.id,
             restaurant_id=reservation.restaurant_id, idempotency_key=payload.idempotency_key,
             offer_id=offer.id if offer else None, offer_code=code, items=snapshots,
-            subtotal=subtotal, discount_amount=discount, total=total, status="PLACED",
+            subtotal=subtotal, discount_amount=discount, tax_percent=tax_percent,
+            tax_amount=tax_amount, total=total, status="PLACED",
             payment_method=payload.payment_method, payment_status=payment_status,
             paid_at=datetime.now(timezone.utc) if payment_status == "PAID" else None,
             customer_note=payload.customer_note)
@@ -503,7 +515,8 @@ def manager_queue_reservation_preorder(reservation_id: uuid.UUID,
                 "unit_price": float(unit_price), "line_total": float(line_total)})
         subtotal = subtotal.quantize(CENT, rounding=ROUND_HALF_UP)
         preorder_discount = Decimal(reservation.preorder_discount or 0).quantize(CENT, rounding=ROUND_HALF_UP)
-        if subtotal != (Decimal(reservation.preorder_total).quantize(CENT, rounding=ROUND_HALF_UP) + preorder_discount):
+        preorder_tax = Decimal(reservation.preorder_tax_amount or 0).quantize(CENT, rounding=ROUND_HALF_UP)
+        if subtotal != (Decimal(reservation.preorder_total).quantize(CENT, rounding=ROUND_HALF_UP) - preorder_tax + preorder_discount):
             raise HTTPException(status_code=409, detail="The saved preorder total is inconsistent.")
 
         payment_method = reservation.preorder_payment_method
@@ -528,7 +541,9 @@ def manager_queue_reservation_preorder(reservation_id: uuid.UUID,
             offer_id=preorder_offer.id if preorder_offer else None,
             offer_code=reservation.preorder_offer_code,
             discount_amount=preorder_discount,
-            total=(subtotal - preorder_discount).quantize(CENT, rounding=ROUND_HALF_UP),
+            tax_percent=Decimal(reservation.preorder_tax_percent or 0),
+            tax_amount=preorder_tax,
+            total=Decimal(reservation.preorder_total).quantize(CENT, rounding=ROUND_HALF_UP),
             status="PLACED",
             payment_method=payment_method or "PAY_AT_DESK",
             payment_status=payment_status,
@@ -590,7 +605,7 @@ def cancel_customer_order(order_id: uuid.UUID, payload: CustomerOrderCancellatio
         account.balance = Decimal(account.balance) + Decimal(row.total)
         db.add(WalletTransaction(user_id=customer.id, amount=Decimal(row.total), transaction_type="REFUND",
             description="Wallet refund for cancelled food order", reference=f"food-order:{row.id}"))
-        if row.payment_method == "WALLET":
+        if row.payment_method in {"WALLET", "RAZORPAY"}:
             reverse_restaurant_payment(db, row.restaurant_id, Decimal(row.total),
                 f"Customer wallet refund · ORD-{row.id.hex[:8].upper()}", f"customer-refund:order:{row.id}")
         row.payment_status = "REFUNDED"
@@ -624,7 +639,7 @@ def update_status(order_id: uuid.UUID, next_status: str, allowed: dict, staff: U
         is_preorder = row.reservation_id is not None and row.idempotency_key == uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(row.reservation_id))
         if is_preorder:
             reservation = db.query(Reservation).filter(Reservation.id == row.reservation_id).with_for_update().first()
-            if row.payment_method == "WALLET":
+            if row.payment_method in {"WALLET", "RAZORPAY"}:
                 account = db.query(WalletAccount).filter(WalletAccount.user_id == row.customer_id).with_for_update().first()
                 if account is None:
                     raise HTTPException(status_code=409, detail="Wallet refund could not be completed. Contact support.")
@@ -645,7 +660,7 @@ def update_status(order_id: uuid.UUID, next_status: str, allowed: dict, staff: U
             row.payment_status = "REFUNDED"
             db.add(WalletTransaction(user_id=row.customer_id, amount=Decimal(row.total), transaction_type="REFUND",
                 description="Wallet refund for cancelled food order", reference=f"food-order:{row.id}"))
-            if row.payment_method == "WALLET":
+            if row.payment_method in {"WALLET", "RAZORPAY"}:
                 reverse_restaurant_payment(db, row.restaurant_id, Decimal(row.total),
                     f"Customer wallet refund · ORD-{row.id.hex[:8].upper()}", f"customer-refund:order:{row.id}")
     row.status = next_status
@@ -711,9 +726,13 @@ def manager_create_spot_order(payload: SpotOrderInput, manager: User = Depends(c
                 "description": variant.food.description, "image_url": variant.food.image.image_url if variant.food.image else None,
                 "variant_name": variant.name, "quantity": quantity, "unit_price": float(price), "line_total": float(line_total)})
         subtotal = subtotal.quantize(CENT, rounding=ROUND_HALF_UP)
+        tax_percent = Decimal(settings.order_tax_percent).quantize(CENT, rounding=ROUND_HALF_UP)
+        tax_amount = (subtotal * tax_percent / Decimal("100")).quantize(CENT, rounding=ROUND_HALF_UP)
+        total = (subtotal + tax_amount).quantize(CENT, rounding=ROUND_HALF_UP)
         order = FoodOrder(customer_id=None, guest_name=payload.guest_name, table_id=table.id,
             restaurant_id=restaurant.id, idempotency_key=payload.idempotency_key, items=snapshots,
-            subtotal=subtotal, discount_amount=Decimal("0.00"), total=subtotal, status="PLACED",
+            subtotal=subtotal, discount_amount=Decimal("0.00"), tax_percent=tax_percent,
+            tax_amount=tax_amount, total=total, status="PLACED",
             payment_method="PAY_AT_DESK", payment_status="PENDING", customer_note=payload.customer_note)
         table.status = "occupied"
         db.add(order)

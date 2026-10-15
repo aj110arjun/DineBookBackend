@@ -22,11 +22,13 @@ from app.models.realtime import RealtimeEvent
 from app.services.notifications import create_notification
 from app.routers.admin_auth import current_admin
 from app.routers.customer_auth import current_customer
+from app.routers.chef_auth import current_chef
 from app.routers.manager_auth import current_manager
 
 customer_router = APIRouter(prefix="/api/customer/wallet", tags=["customer wallet"])
 admin_router = APIRouter(prefix="/api/admin/wallet", tags=["wallet administration"])
 manager_router = APIRouter(prefix="/api/manager/wallet", tags=["manager wallet"])
+chef_wallet_router = APIRouter(prefix="/api/chef/wallet", tags=["chef wallet"])
 MIN_TOPUP = Decimal("100.00")
 MAX_TOPUP = Decimal("50000.00")
 
@@ -203,6 +205,84 @@ def get_or_create_wallet(db: Session, user_id: uuid.UUID, *, lock: bool = False)
         db.add(account)
         db.flush()
     return account
+
+
+def wallet_for_user(user: User, db: Session) -> dict:
+    account = get_or_create_wallet(db, user.id)
+    transactions = db.query(WalletTransaction).filter(WalletTransaction.user_id == user.id) \
+        .order_by(WalletTransaction.created_at.desc(), WalletTransaction.id.desc()).limit(100).all()
+    refs = [row.reference for row in transactions if row.reference]
+    topups = db.query(WalletTopUp).filter(WalletTopUp.user_id == user.id,
+        WalletTopUp.razorpay_payment_id.in_(refs)).all() if refs else []
+    return wallet_data(account, transactions, topups)
+
+
+def create_user_topup_order(payload: WalletTopUpRequest, user: User, db: Session, wallet_label: str) -> dict:
+    if payload.amount.as_tuple().exponent < -2:
+        raise HTTPException(status_code=422, detail="Enter an amount with no more than two decimal places.")
+    topup_id = uuid.uuid4()
+    order = razorpay_request("POST", "orders", {
+        "amount": int(payload.amount * 100), "currency": "INR", "receipt": f"wallet_{topup_id.hex[:32]}",
+        "notes": {"user_id": str(user.id), "wallet_topup_id": str(topup_id)},
+    })
+    if order.get("currency") != "INR" or int(order.get("amount", -1)) != int(payload.amount * 100):
+        raise HTTPException(status_code=502, detail="The payment provider returned an unexpected order amount.")
+    db.add(WalletTopUp(id=topup_id, user_id=user.id, razorpay_order_id=order["id"], amount=payload.amount))
+    db.commit()
+    return {"key_id": settings.razorpay_key_id, "order_id": order["id"], "amount": order["amount"],
+        "currency": order["currency"], "name": "DineBook", "description": f"Add money to your {wallet_label} wallet"}
+
+
+def verify_user_topup(payload: WalletTopUpVerification, user: User, db: Session) -> dict:
+    topup = db.query(WalletTopUp).filter(
+        WalletTopUp.razorpay_order_id == payload.razorpay_order_id,
+        WalletTopUp.user_id == user.id,
+    ).with_for_update().first()
+    if topup is None:
+        raise HTTPException(status_code=404, detail="Wallet top-up order not found.")
+    if topup.status == "PAID":
+        account = get_or_create_wallet(db, user.id)
+        return {"message": "Wallet top-up already applied.", "balance": float(account.balance)}
+    if not settings.razorpay_key_secret:
+        raise HTTPException(status_code=503, detail="Wallet top-ups are not configured yet.")
+    signed_payload = f"{topup.razorpay_order_id}|{payload.razorpay_payment_id}".encode()
+    expected_signature = hmac.new(settings.razorpay_key_secret.encode(), signed_payload, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_signature, payload.razorpay_signature):
+        raise HTTPException(status_code=400, detail="Payment verification failed. No wallet funds were added.")
+    payment = razorpay_request("GET", f"payments/{payload.razorpay_payment_id}")
+    expected_minor_units = int(Decimal(topup.amount) * 100)
+    if payment.get("order_id") != topup.razorpay_order_id or payment.get("amount") != expected_minor_units or payment.get("currency") != "INR" or payment.get("status") != "captured":
+        raise HTTPException(status_code=409, detail="Payment is not captured yet. Your wallet has not been credited.")
+    account = get_or_create_wallet(db, user.id, lock=True)
+    account.balance = Decimal(account.balance) + Decimal(topup.amount)
+    topup.status = "PAID"
+    topup.razorpay_payment_id = payload.razorpay_payment_id
+    topup.paid_at = datetime.now(timezone.utc)
+    db.add(WalletTransaction(user_id=user.id, amount=topup.amount, transaction_type="CREDIT",
+        description="Wallet top-up", reference=payload.razorpay_payment_id))
+    db.add(RealtimeEvent(user_id=user.id, event_type="payment.status_changed",
+        resource_id=str(topup.id), data={"status": "PAID", "resource_type": "wallet_topup"}))
+    db.commit()
+    db.refresh(account)
+    return {"message": "Wallet top-up successful.", "balance": float(account.balance)}
+
+
+def record_user_topup_failure(payload: WalletTopUpFailure, user: User, db: Session) -> dict:
+    topup = db.query(WalletTopUp).filter(
+        WalletTopUp.razorpay_order_id == payload.razorpay_order_id,
+        WalletTopUp.user_id == user.id,
+    ).with_for_update().first()
+    if topup is None:
+        raise HTTPException(status_code=404, detail="Wallet top-up order not found.")
+    if topup.status == "PAID":
+        return {"message": "This top-up was already completed.", "status": topup.status}
+    topup.status = "FAILED"
+    if payload.razorpay_payment_id:
+        topup.razorpay_payment_id = payload.razorpay_payment_id
+    db.add(RealtimeEvent(user_id=user.id, event_type="payment.status_changed",
+        resource_id=str(topup.id), data={"status": "FAILED", "resource_type": "wallet_topup"}))
+    db.commit()
+    return {"message": "Failed wallet payment recorded.", "status": topup.status}
 
 
 def manager_wallet_data(manager: User, db: Session) -> dict:
@@ -430,3 +510,47 @@ def credit_wallet(payload: AdminWalletCredit, admin: User = Depends(current_admi
         description=payload.description, reference=payload.reference or f"Admin credit by {admin.email}"))
     db.commit()
     return {"message": "Wallet credited.", "balance": float(account.balance)}
+
+
+@admin_router.get("")
+def get_admin_wallet(admin: User = Depends(current_admin), db: Session = Depends(get_db)) -> dict:
+    data = wallet_for_user(admin, db)
+    db.commit()
+    return data
+
+
+@admin_router.post("/topups/order")
+def create_admin_topup_order(payload: WalletTopUpRequest, admin: User = Depends(current_admin), db: Session = Depends(get_db)) -> dict:
+    return create_user_topup_order(payload, admin, db, "admin")
+
+
+@admin_router.post("/topups/verify")
+def verify_admin_topup(payload: WalletTopUpVerification, admin: User = Depends(current_admin), db: Session = Depends(get_db)) -> dict:
+    return verify_user_topup(payload, admin, db)
+
+
+@admin_router.post("/topups/failure")
+def record_admin_topup_failure(payload: WalletTopUpFailure, admin: User = Depends(current_admin), db: Session = Depends(get_db)) -> dict:
+    return record_user_topup_failure(payload, admin, db)
+
+
+@chef_wallet_router.get("")
+def get_chef_wallet(chef: User = Depends(current_chef), db: Session = Depends(get_db)) -> dict:
+    data = wallet_for_user(chef, db)
+    db.commit()
+    return data
+
+
+@chef_wallet_router.post("/topups/order")
+def create_chef_topup_order(payload: WalletTopUpRequest, chef: User = Depends(current_chef), db: Session = Depends(get_db)) -> dict:
+    return create_user_topup_order(payload, chef, db, "chef")
+
+
+@chef_wallet_router.post("/topups/verify")
+def verify_chef_topup(payload: WalletTopUpVerification, chef: User = Depends(current_chef), db: Session = Depends(get_db)) -> dict:
+    return verify_user_topup(payload, chef, db)
+
+
+@chef_wallet_router.post("/topups/failure")
+def record_chef_topup_failure(payload: WalletTopUpFailure, chef: User = Depends(current_chef), db: Session = Depends(get_db)) -> dict:
+    return record_user_topup_failure(payload, chef, db)

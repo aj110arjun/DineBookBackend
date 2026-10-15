@@ -64,6 +64,11 @@ class ManagerLoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+class RestaurantCoordinatesRequest(BaseModel):
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+
+
 def send_manager_verification_email(email: str, code: str) -> None:
     send_branded_email(
         to=email, subject="Your DineBook confirmation code", title="Confirm your email",
@@ -191,6 +196,25 @@ def current_manager(
     return manager
 
 
+@router.put("/restaurant/location", response_model=dict)
+def update_manager_restaurant_location(
+    payload: RestaurantCoordinatesRequest,
+    manager: User = Depends(current_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    restaurant = db.query(Restaurant).filter(Restaurant.manager_id == manager.id).first()
+    if restaurant is None:
+        raise HTTPException(status_code=404, detail="No restaurant is linked to this account.")
+    restaurant.latitude = payload.latitude
+    restaurant.longitude = payload.longitude
+    db.commit()
+    return {
+        "latitude": float(restaurant.latitude),
+        "longitude": float(restaurant.longitude),
+        "message": "Restaurant location saved.",
+    }
+
+
 @router.post(
     "/register",
     response_model=dict,
@@ -211,6 +235,8 @@ async def register_manager(
     city: str = Form(...),
     state: str = Form(...),
     pin_code: str = Form(...),
+    latitude: float | None = Form(None, ge=-90, le=90),
+    longitude: float | None = Form(None, ge=-180, le=180),
 
     capacity: int = Form(..., gt=0),
     tables: int = Form(..., gt=0),
@@ -265,6 +291,9 @@ async def register_manager(
     city = city.strip()
     state = state.strip()
     pin_code = pin_code.strip()
+
+    if (latitude is None) != (longitude is None):
+        raise HTTPException(status_code=400, detail="Restaurant latitude and longitude must be provided together.")
 
     if len(name) < 2 or len(name) > 120:
         raise HTTPException(
@@ -358,6 +387,8 @@ async def register_manager(
         city=city,
         state=state,
         pin_code=pin_code,
+        latitude=latitude,
+        longitude=longitude,
         capacity=capacity,
         tables=tables,
         status=RestaurantStatus.PENDING,
@@ -805,6 +836,8 @@ def get_current_manager(
         "role": manager.role.value,
         "status": manager.status.value,
         "restaurant_name": restaurant.name if restaurant else None,
+        "restaurant_latitude": float(restaurant.latitude) if restaurant and restaurant.latitude is not None else None,
+        "restaurant_longitude": float(restaurant.longitude) if restaurant and restaurant.longitude is not None else None,
         "restaurant_hours": hours,
     }
 

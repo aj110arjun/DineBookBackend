@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+from decimal import Decimal
 import os
 from pathlib import Path
 
@@ -34,6 +35,7 @@ class Settings(BaseSettings):
     razorpay_key_secret: str | None = None
     razorpay_webhook_secret: str | None = None
     razorpay_webhook_previous_secret: str | None = None
+    order_tax_percent: Decimal = Field(default=Decimal("18.00"), ge=0, le=100)
 
     model_config = SettingsConfigDict(
         # Resolve from the backend source directory so config works whether

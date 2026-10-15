@@ -1,7 +1,8 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_
+from pydantic import BaseModel, Field
+from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.database import get_db
@@ -12,6 +13,16 @@ from app.models.menu import Category, Food
 
 
 router = APIRouter(prefix="/api/customer/restaurants", tags=["customer restaurants"])
+
+
+class NearbyRestaurantSearch(BaseModel):
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    search: str | None = Field(default=None, max_length=100)
+    cuisine: list[str] = Field(default_factory=list)
+    location: list[str] = Field(default_factory=list)
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=6, ge=1, le=100)
 
 
 @router.get("/{restaurant_id}/menu", response_model=list[dict])
@@ -64,15 +75,22 @@ def list_customer_restaurants(
     search: str | None = Query(default=None, max_length=100),
     cuisine: list[str] = Query(default=[]),
     location: list[str] = Query(default=[]),
-    sort: str = Query(default="newest", pattern="^(newest|name|name-desc)$"),
+    sort: str = Query(default="newest", pattern="^(newest|name|name-desc|distance)$"),
     page: int | None = Query(default=None, ge=1),
     page_size: int | None = Query(default=None, ge=1, le=100),
+    latitude: float | None = Query(default=None, ge=-90, le=90),
+    longitude: float | None = Query(default=None, ge=-180, le=180),
     db: Session = Depends(get_db),
 ) -> dict | list[dict]:
+    if (latitude is None) != (longitude is None):
+        raise HTTPException(status_code=422, detail="Latitude and longitude must be provided together.")
+    if sort == "distance" and latitude is None:
+        raise HTTPException(status_code=422, detail="Your location is required to sort by distance.")
+
     base_query = db.query(Restaurant).filter(Restaurant.status == RestaurantStatus.APPROVED)
     # Keep the unparameterized response compatible with existing callers such as
     # the landing page and profile. The directory requests paginated results.
-    legacy_call = not any((search, cuisine, location, page, page_size)) and sort == "newest"
+    legacy_call = not any((search, cuisine, location, page, page_size, latitude, longitude)) and sort == "newest"
     page = page or 1
     page_size = page_size or 6
 
@@ -96,55 +114,114 @@ def list_customer_restaurants(
                 location_filters.append(Restaurant.city == parts[0])
         base_query = base_query.filter(or_(*location_filters))
 
+    if sort == "distance":
+        base_query = base_query.filter(
+            Restaurant.latitude.is_not(None),
+            Restaurant.longitude.is_not(None),
+        )
     total = base_query.count()
     if sort == "name":
         base_query = base_query.order_by(func.lower(Restaurant.name), Restaurant.id)
     elif sort == "name-desc":
         base_query = base_query.order_by(func.lower(Restaurant.name).desc(), Restaurant.id)
+    elif sort == "distance":
+        user_latitude = func.radians(latitude)
+        latitude_delta = func.radians(Restaurant.latitude - latitude)
+        longitude_delta = func.radians(Restaurant.longitude - longitude)
+        haversine_a = (
+            func.power(func.sin(latitude_delta / 2.0), 2)
+            + func.cos(user_latitude)
+            * func.cos(func.radians(Restaurant.latitude))
+            * func.power(func.sin(longitude_delta / 2.0), 2)
+        )
+        haversine_a = func.least(1.0, func.greatest(0.0, haversine_a))
+        distance_expression = case(
+            (Restaurant.latitude.is_(None) | Restaurant.longitude.is_(None), None),
+            else_=6371.0 * 2.0 * func.asin(func.sqrt(haversine_a)),
+        )
+        base_query = base_query.order_by(distance_expression.asc().nulls_last(), Restaurant.id)
     else:
+        distance_expression = None
         base_query = base_query.order_by(Restaurant.created_at.desc(), Restaurant.id)
     if not legacy_call:
         base_query = base_query.offset((page - 1) * page_size).limit(page_size)
-    restaurants = base_query.all()
-    images = (
-        db.query(RestaurantDocument.restaurant_id, RestaurantDocument.file_path)
+    # Select only fields used by the response and fetch each restaurant's first
+    # branding image via an indexed scalar subquery. This avoids loading every
+    # ORM column plus all historical branding documents for the page.
+    first_branding_image = (
+        db.query(RestaurantDocument.file_path)
         .filter(
-            RestaurantDocument.restaurant_id.in_([restaurant.id for restaurant in restaurants]),
+            RestaurantDocument.restaurant_id == Restaurant.id,
             RestaurantDocument.document_type == RestaurantDocumentType.BRANDING_IMAGE,
         )
-        .order_by(RestaurantDocument.created_at.asc())
-        .all()
+        .order_by(RestaurantDocument.created_at.asc(), RestaurantDocument.id.asc())
+        .limit(1)
+        .correlate(Restaurant)
+        .scalar_subquery()
     )
-    image_by_restaurant = {}
-    for restaurant_id, image in images:
-        image_by_restaurant.setdefault(restaurant_id, image)
-    items = [
-        {
-            "id": str(restaurant.id),
-            "name": restaurant.name,
-            "description": restaurant.description,
-            "cuisine": restaurant.cuisine_type or "Restaurant",
-            "location": ", ".join(
-                part for part in (restaurant.city, restaurant.state) if part
-            ),
-            "address": restaurant.address,
-            "status": restaurant.status.value,
-            "image": image_by_restaurant.get(restaurant.id),
-            "created_at": restaurant.created_at,
-        }
-        for restaurant in restaurants
+    selected_columns = [
+        Restaurant.id,
+        Restaurant.name,
+        Restaurant.description,
+        Restaurant.cuisine_type,
+        Restaurant.city,
+        Restaurant.state,
+        Restaurant.address,
+        Restaurant.status,
+        Restaurant.created_at,
+        first_branding_image.label("image"),
     ]
+    if sort == "distance":
+        selected_columns.append(distance_expression.label("distance_km"))
+    restaurant_rows = base_query.with_entities(*selected_columns).all()
+    items = []
+    for row in restaurant_rows:
+        item = {
+            "id": str(row.id),
+            "name": row.name,
+            "description": row.description,
+            "cuisine": row.cuisine_type or "Restaurant",
+            "location": ", ".join(
+                part for part in (row.city, row.state) if part
+            ),
+            "address": row.address,
+            "status": row.status.value,
+            "image": row.image,
+            "created_at": row.created_at,
+        }
+        if sort == "distance":
+            item["distance_km"] = round(float(row.distance_km), 2) if row.distance_km is not None else None
+        items.append(item)
     if legacy_call:
         return items
     # Facets come from the full approved set so options remain available even
     # when the current result page does not contain every cuisine or city.
-    facet_rows = db.query(Restaurant.cuisine_type, Restaurant.city, Restaurant.state).filter(
-        Restaurant.status == RestaurantStatus.APPROVED,
-    ).all()
-    cuisines = sorted({row[0] or "Restaurant" for row in facet_rows}, key=str.lower)
-    locations = sorted({", ".join(part for part in (row[1], row[2]) if part) for row in facet_rows if row[1] or row[2]}, key=str.lower)
+    approved = Restaurant.status == RestaurantStatus.APPROVED
+    cuisine_rows = db.query(Restaurant.cuisine_type).filter(approved).distinct().all()
+    location_rows = db.query(Restaurant.city, Restaurant.state).filter(approved).distinct().all()
+    cuisines = sorted({row[0] or "Restaurant" for row in cuisine_rows}, key=str.lower)
+    locations = sorted({", ".join(part for part in row if part) for row in location_rows if row[0] or row[1]}, key=str.lower)
     return {"items": items, "total": total, "page": page, "page_size": page_size,
             "cuisines": cuisines, "locations": locations}
+
+
+@router.post("/nearby")
+def list_nearby_customer_restaurants(
+    payload: NearbyRestaurantSearch,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return a paginated restaurant directory ordered by distance from the customer."""
+    return list_customer_restaurants(
+        search=payload.search,
+        cuisine=payload.cuisine,
+        location=payload.location,
+        sort="distance",
+        page=payload.page,
+        page_size=payload.page_size,
+        latitude=payload.latitude,
+        longitude=payload.longitude,
+        db=db,
+    )
 
 
 @router.get("/{restaurant_id}", response_model=dict)
