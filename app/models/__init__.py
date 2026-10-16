@@ -16,6 +16,7 @@ from app.models.reviews import Review, ReviewFlag, ReviewReply, ReviewModeration
 from app.models.notifications import Notification, NotificationPreference
 from app.models.revenue import PlatformCommission, PlatformCommissionPayout, PlatformRevenueSettings
 from app.models.restaurant_staff import RestaurantStaff
+from app.models.rate_limit import RateLimitBucket
 
 __all__ = [
     "AccountStatus",
@@ -23,6 +24,7 @@ __all__ = [
     "Restaurant",
     "RestaurantStatus",
     "RestaurantStaff",
+    "RateLimitBucket",
     "RestaurantDocument",
     "RestaurantDocumentType",
     "RestaurantHours",

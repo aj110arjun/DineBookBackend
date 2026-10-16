@@ -53,6 +53,8 @@ The application reads `Backend/src/.env` and process environment variables. `.en
 
 Responses larger than 1 KiB are gzip-compressed when the client advertises gzip support. Server-sent event streams are left uncompressed so events can be delivered as they are produced.
 
+API request middleware counts body bytes as they arrive, rejects unsupported HTTP methods, logs request IDs/status/duration without recording request data, and returns a generic error with the request ID for unexpected API failures. Rate limits use PostgreSQL counters shared across API workers: login (10/minute), account recovery (6/minute), other authentication writes (20/minute), booking/payment writes (30/minute), restaurant discovery (180/minute), other writes (180/minute), and other API reads (600/minute), per ASGI client IP and fixed 60-second windows. Razorpay webhooks and event streams use dedicated handling and are excluded from general limits. Configure Uvicorn to trust forwarded client addresses only from your known reverse proxy; otherwise requests behind the proxy share the proxy IP for rate limiting. Old counters are periodically pruned. Limited requests return `429` with `Retry-After`; if PostgreSQL counters are unavailable, requests covered by a limit return `503`.
+
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | SQLAlchemy PostgreSQL URL; required |
@@ -63,6 +65,8 @@ Responses larger than 1 KiB are gzip-compressed when the client advertises gzip 
 | `JWT_EXPIRE_MINUTES` | Session lifetime in minutes; defaults to 10,080 (seven days) |
 | `AUTH_COOKIE_SECURE` | Set to `true` when serving over HTTPS |
 | `MAX_REQUEST_BODY_BYTES` | Maximum accepted request body size; defaults to 20 MiB and must be at least 1 KiB |
+| `MAX_JSON_BODY_BYTES` | Maximum accepted JSON and form request body; defaults to 1 MiB. Multipart uploads use `MAX_REQUEST_BODY_BYTES`. |
+| `RATE_LIMIT_ENABLED` | Enables PostgreSQL-backed API limits; defaults to `true`. Apply migrations before serving API traffic. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD` | SMTP connection settings for verification and account emails |
 | `SMTP_FROM_EMAIL`, `SMTP_USE_TLS` | Sender address and SMTP TLS behavior |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Google OAuth credentials for customer sign-in |
