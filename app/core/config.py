@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60 * 24 * 7
     auth_cookie_secure: bool = False
     max_request_body_bytes: int = Field(default=20 * 1024 * 1024, ge=1024)
+    max_json_body_bytes: int = Field(default=1024 * 1024, ge=1024)
+    rate_limit_enabled: bool = True
     google_client_id: str | None = None
     google_client_secret: str | None = None
     cloudinary_cloud_name: str | None = None

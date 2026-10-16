@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from app.core.config import settings
+from app.middleware import RequestGuardMiddleware
 from app.routers import (
     admin_auth_router,
     admin_managers_router,
@@ -55,7 +56,7 @@ def apply_security_headers(response, request_id: str, duration_ms: float) -> Non
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     started_at = time.perf_counter()
-    request_id = str(uuid.uuid4())
+    request_id = getattr(request.state, "request_id", None) or str(uuid.uuid4())
     request.state.request_id = request_id
     method = request.method.upper()
     path = request.url.path
@@ -113,21 +114,19 @@ async def security_middleware(request: Request, call_next):
             response.headers.setdefault("Cache-Control", "no-store")
     return response
 
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
+app.add_middleware(RequestGuardMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-    settings.frontend_url,
-    *(
-        [settings.frontend_public_url]
-        if settings.frontend_public_url
-        else []
-    ),
-],
+        settings.frontend_url,
+        *([settings.frontend_public_url] if settings.frontend_public_url else []),
+    ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS", "PATCH", "DELETE"],
+    allow_methods=["GET", "HEAD", "POST", "PUT", "OPTIONS", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization", "Last-Event-ID"],
+    expose_headers=["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-Request-ID"],
 )
-app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 app.include_router(customer_auth_router)
 app.include_router(password_recovery_router)

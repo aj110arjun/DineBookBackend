@@ -8,7 +8,6 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.core.email import send_branded_email
-from app.db.database import SessionLocal
 from app.models.dining import DiningTable
 from app.models.reservation import Reservation, ReservationTable
 from app.models.restaurant import Restaurant
@@ -16,15 +15,6 @@ from app.models.user import User
 from app.services.reservation_invoice_pdf import build_reservation_invoice_pdf
 
 logger = logging.getLogger(__name__)
-
-
-def send_reservation_confirmation_in_background(reservation_id: uuid.UUID) -> None:
-    """Send a reservation confirmation with a task-owned database session."""
-    db = SessionLocal()
-    try:
-        send_reservation_confirmation(db, reservation_id)
-    finally:
-        db.close()
 
 
 def _money(value: Decimal | float | int | None) -> str:
@@ -67,14 +57,18 @@ def _invoice_totals(item: Reservation) -> tuple[bool, Decimal, Decimal, Decimal,
 
 def send_reservation_confirmation(db: Session, reservation_id: uuid.UUID) -> bool:
     """Send a branded confirmation once, after the mandatory reservation fee is paid."""
+
     item = db.query(Reservation).filter(Reservation.id == reservation_id).with_for_update().first()
     if item is None or item.status != "CONFIRMED" or item.payment_status != "PAID" or item.confirmation_email_sent_at:
         return False
+
     customer = db.query(User).filter(User.id == item.user_id).first()
     restaurant = db.query(Restaurant).filter(Restaurant.id == item.restaurant_id).first()
+
     if customer is None or restaurant is None or not customer.email:
         logger.warning("Cannot send reservation confirmation email; customer or restaurant is missing for %s", reservation_id)
         return False
+
     assignments = db.query(ReservationTable).filter(ReservationTable.reservation_id == item.id).all()
     table_ids = [assignment.table_id for assignment in assignments]
     tables = db.query(DiningTable).filter(DiningTable.id.in_(table_ids)).all() if table_ids else []
@@ -97,6 +91,7 @@ def send_reservation_confirmation(db: Session, reservation_id: uuid.UUID) -> boo
         f"Reservation fee: {_status(item.payment_method, item.payment_status, item.fee_amount)}",
         preorder_message, "The invoice is attached as a PDF.", "", "Warmly,", "The DineBook team",
     ])
+
     try:
         send_branded_email(
             to=customer.email,
@@ -116,6 +111,7 @@ def send_reservation_confirmation(db: Session, reservation_id: uuid.UUID) -> boo
         db.rollback()
         return False
     item.confirmation_email_sent_at = datetime.now(timezone.utc)
+
     try:
         db.commit()
     except Exception:
