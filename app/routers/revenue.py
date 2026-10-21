@@ -87,14 +87,6 @@ def gross_revenue(db: Session, manager_ids: list[uuid.UUID] | None, period: str)
 
     total = Decimal("0.00")
     reservations = reservation_query.all()
-    reservation_ids = [row.id for row in reservations]
-    preorder_orders = set()
-    if reservation_ids:
-        preorder_orders = {
-            row.idempotency_key for row in db.query(FoodOrder.idempotency_key).filter(
-                FoodOrder.reservation_id.in_(reservation_ids), FoodOrder.idempotency_key.is_not(None)
-            ).all()
-        }
     for row in reservations:
         fee_paid_at = row.paid_at or row.created_at
         if fee_paid_at.tzinfo is None:
@@ -104,7 +96,7 @@ def gross_revenue(db: Session, manager_ids: list[uuid.UUID] | None, period: str)
         preorder_paid_at = row.preorder_paid_at or row.paid_at or row.created_at
         if preorder_paid_at.tzinfo is None:
             preorder_paid_at = preorder_paid_at.replace(tzinfo=timezone.utc)
-        if row.preorder_payment_status == "PAID" and start <= preorder_paid_at < end and uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(row.id)) not in preorder_orders:
+        if row.preorder_payment_status == "PAID" and start <= preorder_paid_at < end:
             total += Decimal(row.preorder_total or 0)
 
     for row in order_query.all():
@@ -156,20 +148,12 @@ def sync_commission_records(db: Session, manager_ids: list[uuid.UUID] | None,
         existing.add(key)
 
     reservations = reservation_query.all()
-    reservation_ids = [row.id for row in reservations]
-    preorder_order_ids = set()
-    if reservation_ids:
-        preorder_order_ids = {row.idempotency_key for row in db.query(FoodOrder.idempotency_key).filter(
-            FoodOrder.reservation_id.in_(reservation_ids), FoodOrder.idempotency_key.is_not(None)
-        ).all()}
     for row in reservations:
         fee_paid_at = row.paid_at or row.created_at
         add_record("RESERVATION_FEE", row.id, row.restaurant_id, Decimal(row.fee_amount or 0), fee_paid_at)
         preorder_paid_at = row.preorder_paid_at or row.paid_at or row.created_at
-        preorder_key = uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(row.id))
         if (row.preorder_payment_status == "PAID" and
-                row.preorder_payment_method in ("WALLET", "RAZORPAY", "PAY_AT_DESK") and
-                preorder_key not in preorder_order_ids):
+                row.preorder_payment_method in ("WALLET", "RAZORPAY", "PAY_AT_DESK")):
             add_record("PREORDER", row.id, row.restaurant_id, Decimal(row.preorder_total or 0), preorder_paid_at)
 
     for row in order_query.all():
