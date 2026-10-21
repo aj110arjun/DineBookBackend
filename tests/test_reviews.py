@@ -1,4 +1,5 @@
 import unittest
+from tests import sqlite_support
 import uuid
 
 from fastapi import HTTPException
@@ -10,7 +11,7 @@ from app.models.restaurant import Restaurant
 from app.models.orders import FoodOrder
 from app.models.reviews import Review, ReviewFlag, ReviewModerationEvent
 from app.models.user import User, UserRole
-from app.routers.reviews import ActionPayload, ReviewPayload, create_review, update_review, moderate
+from app.routers.reviews import ActionPayload, ReviewPayload, FlagPayload, create_review, update_review, moderate, flag_review
 
 
 class ReviewModerationTests(unittest.TestCase):
@@ -83,6 +84,14 @@ class ReviewModerationTests(unittest.TestCase):
         self.db.add(order); self.db.commit()
         with self.assertRaises(HTTPException) as caught:
             create_review(ReviewPayload(order_id=order.id, rating=5, content="Too soon"), self.customer, self.db)
+        self.assertEqual(caught.exception.status_code, 409)
+
+    def test_duplicate_report_returns_conflict_instead_of_database_error(self):
+        other = User(name="Reporter", email="reporter@example.com", password_hash="x", role=UserRole.CUSTOMER)
+        self.db.add(other); self.db.commit()
+        flag_review(self.review.id, FlagPayload(reason="SPAM"), other, self.db)
+        with self.assertRaises(HTTPException) as caught:
+            flag_review(self.review.id, FlagPayload(reason="SPAM"), other, self.db)
         self.assertEqual(caught.exception.status_code, 409)
 
 

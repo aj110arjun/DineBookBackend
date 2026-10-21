@@ -87,7 +87,11 @@ def create_review(payload: ReviewPayload, customer: User = Depends(current_custo
             raise HTTPException(422, "Food item was not included in this order.")
     review = Review(customer_id=customer.id, restaurant_id=order.restaurant_id, order_id=order.id, food_id=payload.food_id, rating=payload.rating, content=content)
     db.add(review)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "You have already reviewed this restaurant or order.") from exc
     create_notification(db, customer, notification_type="review.submitted", category="REVIEW",
         title="Review submitted", message="Your review was submitted successfully.", restaurant_id=order.restaurant_id,
         entity_type="review", entity_id=review.id, action_url="/customer/profile/reviews",
@@ -138,7 +142,11 @@ def flag_review(review_id: uuid.UUID, payload: FlagPayload, customer: User = Dep
         raise HTTPException(409, "You cannot report your own review.")
     flag = ReviewFlag(review_id=review_id, customer_id=customer.id, reason=payload.reason, explanation=clean(payload.explanation) if payload.explanation else None)
     db.add(flag)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "You have already reported this review.") from exc
     for admin in db.query(User).filter(User.role == "ADMIN", User.is_active.is_(True)).all():
         create_notification(db, admin, notification_type="review.flagged", category="REVIEW",
             title="Review flagged for moderation", message="A customer report requires moderation.",
@@ -191,7 +199,7 @@ def manager_reviews(manager: User = Depends(current_manager), db: Session = Depe
 @manager_router.put("/{review_id}/reply")
 def save_reply(review_id: uuid.UUID, payload: ReplyPayload, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
     restaurant = manager_restaurant(manager, db)
-    review = db.query(Review).filter(Review.id == review_id, Review.restaurant_id == restaurant.id, Review.status == "PUBLISHED").first()
+    review = db.query(Review).filter(Review.id == review_id, Review.restaurant_id == restaurant.id, Review.status == "PUBLISHED").with_for_update().first()
     if review is None: raise HTTPException(404, "Published review not found for your restaurant.")
     content = clean(payload.content)
     if len(content) < 2: raise HTTPException(422, "Reply must contain at least 2 non-space characters.")
