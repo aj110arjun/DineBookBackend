@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.email import send_branded_email
 from app.core.otp import verification_code_expired
-from app.core.security import hash_password, verify_secret
+from app.core.security import hash_password, verify_secret, validate_new_password
 from app.db.database import get_db
 from app.models.user import EmailVerificationCode, User, UserRole
 
@@ -33,11 +33,7 @@ class RecoveryResetRequest(RecoveryEmailRequest):
     @field_validator("new_password")
     @classmethod
     def validate_password(cls, value: str) -> str:
-        if not any(char.isalpha() for char in value):
-            raise ValueError("Password must include a letter.")
-        if not any(not char.isalpha() and not char.isspace() for char in value):
-            raise ValueError("Password must include a number or symbol.")
-        return value
+        return validate_new_password(value)
 
 
 def send_portal_reset_email(email: str, code: str, role: str) -> None:
@@ -103,6 +99,8 @@ def reset_portal_password(
     if not verify_secret(payload.code, verification.code_hash):
         raise HTTPException(status_code=400, detail="That reset code is incorrect.")
     account.password_hash = hash_password(payload.new_password)
+    account.password_changed_at = datetime.now(timezone.utc)
+    account.must_change_password = False
     db.delete(verification)
     db.commit()
     return {"message": "Your password has been reset. You can now sign in."}

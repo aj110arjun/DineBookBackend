@@ -27,6 +27,8 @@ from app.core.security import (
     decode_access_token,
     hash_password,
     verify_secret,
+    session_is_current,
+    validate_new_password,
 )
 from app.db.database import get_db
 from app.models.restaurant import Restaurant, RestaurantStatus
@@ -166,7 +168,8 @@ def current_manager(
         raise unauthorized
 
     try:
-        subject = decode_access_token(token).get("sub")
+        claims = decode_access_token(token)
+        subject = claims.get("sub")
         manager_id = uuid.UUID(subject)
 
         manager = (
@@ -186,6 +189,7 @@ def current_manager(
         or manager.status != AccountStatus.ACTIVE
         or not manager.is_active
         or not manager.email_verified
+        or not session_is_current(claims, manager)
     ):
         raise unauthorized
 
@@ -304,11 +308,10 @@ async def register_manager(
     if any(not (character.isalpha() or character.isspace() or character in "'-.") for character in name):
         raise HTTPException(status_code=400, detail="Manager name may only contain letters, spaces, apostrophes, hyphens, and periods.")
 
-    if len(password) < 10 or len(password) > 128:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Password must contain at least 8 characters.",
-        )
+    try:
+        validate_new_password(password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     for value, label, minimum, maximum in (
         (restaurant_name, "Restaurant name", 2, 255), (cuisine_type, "Cuisine type", 2, 100),
@@ -321,6 +324,10 @@ async def register_manager(
         raise HTTPException(status_code=400, detail="Restaurant name may only contain letters, numbers, spaces, apostrophes, hyphens, and periods.")
     if len(restaurant_description) > 2000:
         raise HTTPException(status_code=400, detail="Restaurant description cannot exceed 2000 characters.")
+    if not re.fullmatch(r"\+?[0-9][0-9 ()-]{5,18}[0-9]", restaurant_contact):
+        raise HTTPException(status_code=400, detail="Enter a valid restaurant phone number.")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 -]{1,18}[A-Za-z0-9]", pin_code):
+        raise HTTPException(status_code=400, detail="Enter a valid PIN or ZIP code.")
 
     try:
         existing_user = (

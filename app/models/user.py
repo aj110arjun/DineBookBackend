@@ -36,6 +36,7 @@ class User(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
     )
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     role: Mapped[UserRole] = mapped_column(Enum(UserRole, name="user_role"), nullable=False)
     status: Mapped[AccountStatus] = mapped_column(
         Enum(AccountStatus, name="account_status"), nullable=False, default=AccountStatus.ACTIVE

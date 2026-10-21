@@ -1,11 +1,12 @@
 import uuid
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
-from pydantic import BaseModel, EmailStr, Field
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
-from app.core.security import create_access_token, decode_access_token, hash_password, verify_secret
+from app.core.security import create_access_token, decode_access_token, hash_password, verify_secret, session_is_current, validate_new_password
 from app.db.database import get_db
 from app.models.restaurant import Restaurant
 from app.models.menu import Category, Food
@@ -23,12 +24,16 @@ class ChefLoginRequest(BaseModel):
 
 
 class ChefChangePasswordRequest(BaseModel):
-    password: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=10, max_length=128)
+    current_password: str | None = Field(default=None, min_length=1, max_length=128)
+
+    _password_policy = field_validator("password")(validate_new_password)
 
 
 def current_chef(
     token: str | None = Cookie(default=None, alias=ACCESS_COOKIE),
     db: Session = Depends(get_db),
+    request: Request = None,
 ) -> User:
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -38,7 +43,8 @@ def current_chef(
         raise unauthorized
 
     try:
-        subject = decode_access_token(token).get("sub")
+        claims = decode_access_token(token)
+        subject = claims.get("sub")
         chef_id = uuid.UUID(subject)
     except (ValueError, TypeError):
         raise unauthorized
@@ -53,11 +59,14 @@ def current_chef(
         or chef.status != AccountStatus.ACTIVE
         or not chef.is_active
         or not chef.email_verified
+        or not session_is_current(claims, chef)
     ):
         raise unauthorized
     restaurant = db.query(Restaurant).filter(Restaurant.manager_id == chef.manager_id).first()
     if restaurant is not None and restaurant.status.value == "SUSPENDED":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This restaurant has been suspended.")
+    if chef.must_change_password and (request is None or request.url.path not in {"/api/chef/me", "/api/auth/chef/change-password"}):
+        raise HTTPException(status_code=403, detail="Change your temporary password before using the chef portal.")
     return chef
 
 
@@ -142,7 +151,12 @@ def change_chef_password(
     chef: User = Depends(current_chef),
     db: Session = Depends(get_db),
 ) -> dict:
+    if not chef.must_change_password and (not payload.current_password or not verify_secret(payload.current_password, chef.password_hash)):
+        raise HTTPException(status_code=400, detail="Enter your current password to change it.")
+    if verify_secret(payload.password, chef.password_hash):
+        raise HTTPException(status_code=422, detail="Choose a password different from your current password.")
     chef.password_hash = hash_password(payload.password)
+    chef.password_changed_at = datetime.now(timezone.utc)
     chef.must_change_password = False
     db.commit()
     token, _ = create_access_token(str(chef.id))
