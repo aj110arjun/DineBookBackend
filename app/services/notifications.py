@@ -15,6 +15,7 @@ ALLOWED_ACTIONS = {
     "/customer/profile/orders", "/customer/profile/reservations", "/customer/profile/wallet",
     "/customer/profile/reviews", "/manager/orders", "/manager/reservations", "/manager/reviews",
     "/manager/dashboard", "/manager/pending", "/chef/orders", "/admin/reviews", "/admin/requests",
+    "/manager/revenue", "/chef/revenue", "/admin/revenue",
 }
 
 

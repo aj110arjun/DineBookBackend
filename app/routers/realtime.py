@@ -18,6 +18,7 @@ from app.models.user import User, UserRole
 from app.routers.admin_auth import ACCESS_COOKIE as AUTH_COOKIE
 from app.routers.chef_auth import current_chef
 from app.routers.customer_auth import current_customer
+from app.routers.admin_auth import current_admin
 from app.routers.manager_auth import current_manager
 
 router = APIRouter(prefix="/api/events", tags=["realtime events"])
@@ -46,6 +47,8 @@ def _authorize_stream(request: Request) -> tuple[uuid.UUID, uuid.UUID | None]:
         restaurant_id = None
         if user.role == UserRole.CUSTOMER:
             current_customer(token=token, db=db)
+        elif user.role == UserRole.ADMIN:
+            current_admin(token=token, db=db)
         elif user.role == UserRole.MANAGER:
             manager = current_manager(token=token, db=db)
             restaurant_id = db.query(Restaurant.id).filter(Restaurant.manager_id == manager.id).scalar()
