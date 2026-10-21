@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from decimal import Decimal
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -40,6 +40,12 @@ class FloorUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=1000)
     is_active: bool | None = None
 
+    @model_validator(mode="after")
+    def reject_null_required_fields(self):
+        if any(getattr(self, key) is None for key in self.model_fields_set - {"description"}):
+            raise ValueError("Floor number, name, and active state cannot be null.")
+        return self
+
     @field_validator("floor_name")
     @classmethod
     def clean_name(cls, value: str | None) -> str | None:
@@ -75,6 +81,12 @@ class TableUpdate(BaseModel):
     reservation_fee: Decimal | None = Field(default=None, ge=0, le=100000)
     table_type: DiningTableType | None = None
     status: str | None = Field(default=None, pattern="^(available|reserved|occupied|maintenance|inactive)$")
+
+    @model_validator(mode="after")
+    def reject_null_required_fields(self):
+        if any(getattr(self, key) is None for key in self.model_fields_set):
+            raise ValueError("Table fields cannot be null; omit fields you do not want to change.")
+        return self
 
     @field_validator("table_number")
     @classmethod

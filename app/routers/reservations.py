@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import String, and_, cast, func, or_
 from sqlalchemy.orm import Session, joinedload
 
@@ -89,6 +89,21 @@ class ReservationCreate(BaseModel):
     preorder_payment_method: str | None = Field(default=None, pattern="^(PAY_AT_DESK|WALLET|RAZORPAY)$")
     preorder_items: list[PreorderItem] = Field(default_factory=list, max_length=50)
     offer_code: str | None = Field(default=None, max_length=40)
+
+    @field_validator("start_time")
+    @classmethod
+    def local_booking_slot(cls, value: time) -> time:
+        if value.tzinfo is not None or value.second or value.microsecond:
+            raise ValueError("Choose a local booking time with minute precision and no timezone offset.")
+        return value
+
+    @model_validator(mode="after")
+    def consistent_tables(self):
+        if self.table_ids and len(set(self.table_ids)) != len(self.table_ids):
+            raise ValueError("Select each table only once.")
+        if self.table_id and self.table_ids and self.table_ids != [self.table_id]:
+            raise ValueError("Provide either table_id or table_ids, or matching selections.")
+        return self
 
 
 def resolve_preorder_payment_method(fulfillment_type: str, selected_method: str | None,
@@ -206,7 +221,7 @@ def within_operating_hours(db: Session, restaurant_id: uuid.UUID, day: date, sta
         closing = closes.hour * 60 + closes.minute
         if closing <= opening:
             closing += 24 * 60
-        if opening <= starts and ends <= closing:
+        if opening <= starts and ends <= closing and (starts - opening) % 30 == 0:
             return True
     return False
 
@@ -255,6 +270,10 @@ def table_group_data(group: tuple[DiningTable, ...]) -> dict:
 @customer_router.get("/availability")
 def availability(restaurant_id: uuid.UUID, reservation_date: date, start_time: time,
                  number_of_guests: int = Query(ge=1, le=16), db: Session = Depends(get_db)) -> dict:
+    try:
+        ReservationCreate.local_booking_slot(start_time)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id, Restaurant.status == RestaurantStatus.APPROVED).first()
     if restaurant is None:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
@@ -861,6 +880,7 @@ def manager_update_reservation_status(reservation_id: uuid.UUID, payload: Manage
     if payload.status == "COMPLETED":
         pending_orders = db.query(FoodOrder.id).filter(
             FoodOrder.reservation_id == item.id,
+            FoodOrder.status.notin_(("CANCELLED", "REJECTED")),
             ((FoodOrder.status != "COMPLETED") | (FoodOrder.payment_status != "PAID")),
         ).first()
         if pending_orders:

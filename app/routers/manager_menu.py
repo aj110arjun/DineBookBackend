@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -83,7 +84,7 @@ def food_dict(food: Food, restaurant_name: str | None = None) -> dict:
 
 class VariantPayload(BaseModel):
     name: str = Field(min_length=1, max_length=100)
-    price: float = Field(ge=0, le=99999999.99)
+    price: Decimal = Field(ge=0, le=Decimal("99999999.99"), max_digits=10, decimal_places=2)
     is_available: bool = True
 
     @field_validator("name")

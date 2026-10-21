@@ -39,6 +39,13 @@ class Period(BaseModel):
     opens: time
     closes: time
 
+    @field_validator("opens", "closes")
+    @classmethod
+    def local_minute(cls, value: time) -> time:
+        if value.tzinfo is not None or value.second or value.microsecond:
+            raise ValueError("Use local restaurant times with minute precision and no timezone offset.")
+        return value
+
     @model_validator(mode="after")
     def valid_interval(self):
         if self.closes <= self.opens:
