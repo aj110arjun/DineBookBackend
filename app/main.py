@@ -100,6 +100,17 @@ async def security_middleware(request: Request, call_next):
 
     response = await call_next(request)
     apply_security_headers(response, request_id, (time.perf_counter() - started_at) * 1000)
+    if path in {app.docs_url, app.swagger_ui_oauth2_redirect_url}:
+        # FastAPI's Swagger HTML loads its bundle/styles from jsDelivr and
+        # fetches the same-origin OpenAPI schema. Keep the API policy strict.
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "connect-src 'self'; img-src 'self' data: https://fastapi.tiangolo.com; "
+            "font-src 'self' data:; "
+            "base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+        )
     if path.startswith("/api/"):
         # Public restaurant discovery data is requested repeatedly during
         # navigation. Allow a short private browser cache while keeping all

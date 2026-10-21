@@ -4,7 +4,7 @@ FastAPI API for the DineBook customer, manager, chef, and platform administrator
 
 ## Requirements
 
-- Python 3.12 (the checked-in virtual environment is under `Backend/venv`)
+- Python 3.12 or newer; create a local virtual environment after cloning (it is not stored in Git)
 - PostgreSQL
 - SMTP credentials for email verification and portal email workflows
 - Google OAuth credentials for customer Google sign-in
@@ -19,11 +19,13 @@ CREATE ROLE dinebook_user WITH LOGIN PASSWORD 'choose-a-local-password';
 CREATE DATABASE dinebook OWNER dinebook_user;
 ```
 
-From `Backend/src`, create the environment file and install dependencies:
+From the `DineBookBackend` directory, create a virtual environment and install dependencies:
 
 ```bash
-cp .env.example .env
-../venv/bin/pip install -r requirements.txt
+python3 -m venv venv
+venv/bin/python -m pip install -r requirements.txt
+# Only on a fresh clone; preserve an existing .env:
+cp -n .env.example .env
 ```
 
 Set `DATABASE_URL` in `.env`, for example:
@@ -32,11 +34,13 @@ Set `DATABASE_URL` in `.env`, for example:
 DATABASE_URL=postgresql+psycopg://dinebook_user:choose-a-local-password@localhost:5432/dinebook
 ```
 
-Apply all migrations and start the API from `Backend/src`:
+Ensure PostgreSQL is running and `DATABASE_URL` contains your actual database credentials. A restored Git checkout does not restore database contents or `.env` secrets.
+
+Apply all migrations and start the API from `DineBookBackend`:
 
 ```bash
-../venv/bin/alembic upgrade head
-../venv/bin/uvicorn app.main:app --reload
+venv/bin/alembic upgrade head
+venv/bin/python -m uvicorn app.main:app --reload
 ```
 
 The API listens on `http://127.0.0.1:8000`. Interactive docs are at `/docs`, OpenAPI JSON is at `/openapi.json`, and the health endpoint is `/api/health`. Schema setup is migration-driven; starting the API does not create tables.
@@ -49,7 +53,7 @@ Availability preserves the existing Asia/Kolkata timezone, 30-minute slot interv
 
 ## Environment variables
 
-The application reads `Backend/src/.env` and process environment variables. `.env.example` lists the supported values; configure the ones needed for your deployment.
+The application reads `DineBookBackend/.env` and process environment variables. `.env.example` lists the supported values; configure the ones needed for your deployment.
 
 Responses larger than 1 KiB are gzip-compressed when the client advertises gzip support. Server-sent event streams are left uncompressed so events can be delivered as they are produced.
 
@@ -82,7 +86,7 @@ For ngrok development, expose the Vite frontend and set `FRONTEND_PUBLIC_URL` to
 
 All endpoints are under `/api`. The generated `/docs` page lists request models, authentication requirements, and response schemas.
 
-Customer wallet top-ups create Razorpay orders on the server and credit the wallet only after the payment signature and captured payment amount are verified. Configure Razorpay test keys in `Backend/src/.env` for local testing, and apply all migrations with `venv/bin/alembic upgrade head` before using wallet top-ups.
+Customer wallet top-ups create Razorpay orders on the server and credit the wallet only after the payment signature and captured payment amount are verified. Configure Razorpay test keys in `DineBookBackend/.env` for local testing, and apply all migrations with `venv/bin/alembic upgrade head` before using wallet top-ups.
 
 ## Webhooks and real-time events
 
@@ -153,15 +157,16 @@ Reminder scheduling, staff account lifecycle alerts, payment reconciliation inci
 
 Use the same `DATABASE_URL` for Alembic and the API. From `Backend/src`:
 
+
 ```bash
-../venv/bin/alembic current
-../venv/bin/alembic upgrade head
+venv/bin/alembic current
+venv/bin/alembic upgrade head
 ```
 
 ## Code layout
 
 ```text
-Backend/src/
+DineBookBackend/
 ├── app/
 │   ├── core/          # Settings, JWT/password helpers, SMTP, Cloudinary
 │   ├── db/            # SQLAlchemy engine and request sessions

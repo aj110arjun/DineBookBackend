@@ -1,12 +1,22 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+
 from decimal import Decimal
 import os
+
+from pydantic import Field, field_validator
+
 from pathlib import Path
 
 
 class Settings(BaseSettings):
-    database_url: str = os.getenv("DATABASE_URL")
+    database_url: str = ""
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def require_database_url(cls, value):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Set DATABASE_URL in DineBookBackend/.env to your PostgreSQL connection URL.")
+        return value
     frontend_url: str = "http://localhost:5173"
     frontend_public_url: str | None = None 
 
