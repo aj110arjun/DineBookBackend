@@ -11,3 +11,6 @@ tests/
 tests/*
 !tests/test_offer_discounts.py
 !tests/test_reviews.py
+!tests/__init__.py
+!tests/sqlite_support.py
+!tests/test_week1_to_3_validation.py

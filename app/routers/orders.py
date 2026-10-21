@@ -91,6 +91,20 @@ def calculate_offer_discount(offer: FoodOrderOffer, eligible_subtotal: Decimal) 
     return min(raw, base).quantize(CENT, rounding=ROUND_HALF_UP)
 
 
+def customer_offer_uses(db: Session, offer_id: uuid.UUID, customer_id: uuid.UUID) -> int:
+    redemptions = db.query(OfferRedemption.id).filter(
+        OfferRedemption.offer_id == offer_id, OfferRedemption.customer_id == customer_id,
+        OfferRedemption.status == "APPLIED",
+    ).count()
+    claims = db.query(Reservation.id).filter(
+        Reservation.preorder_offer_id == offer_id, Reservation.user_id == customer_id,
+        Reservation.status.in_(("PENDING_PAYMENT", "CONFIRMED", "SEATED")),
+    ).all()
+    return redemptions + sum(1 for (claim_id,) in claims if not db.query(FoodOrder.id).filter(
+        FoodOrder.idempotency_key == uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(claim_id))
+    ).first())
+
+
 class OrderLineInput(BaseModel):
     variant_id: uuid.UUID
     quantity: int = Field(ge=1, le=99)
@@ -108,12 +122,6 @@ class CheckoutInput(BaseModel):
 
 class OfferValidationInput(BaseModel):
     reservation_id: uuid.UUID
-    items: list[OrderLineInput] = Field(min_length=1, max_length=50)
-    offer_code: str = Field(min_length=3, max_length=40)
-
-
-class OfferPreviewInput(BaseModel):
-    restaurant_id: uuid.UUID
     items: list[OrderLineInput] = Field(min_length=1, max_length=50)
     offer_code: str = Field(min_length=3, max_length=40)
 
@@ -184,8 +192,21 @@ class OfferInput(BaseModel):
     eligible_food_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
     eligible_category_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
 
+    @field_validator("title", mode="before")
+    @classmethod
+    def clean_title(cls, value: str) -> str:
+        return " ".join(value.split()) if isinstance(value, str) else value
+
     @model_validator(mode="after")
     def validate_rules(self):
+        if self.starts_at and self.ends_at and self.ends_at <= self.starts_at:
+            raise ValueError("Offer end time must be after its start time.")
+        if self.applicability == "ITEMS" and self.eligible_category_ids:
+            raise ValueError("Item offers cannot include category selections.")
+        if self.applicability == "CATEGORIES" and self.eligible_food_ids:
+            raise ValueError("Category offers cannot include item selections.")
+        if len(set(self.eligible_food_ids)) != len(self.eligible_food_ids) or len(set(self.eligible_category_ids)) != len(self.eligible_category_ids):
+            raise ValueError("Eligible selections must not contain duplicates.")
         if self.applicability == "ITEMS" and not self.eligible_food_ids:
             raise ValueError("Select at least one eligible item.")
         if self.applicability == "CATEGORIES" and not self.eligible_category_ids:
@@ -334,8 +355,7 @@ def create_reserved_order(reservation_id: uuid.UUID, payload: CheckoutInput, cus
                 if eligible:
                     eligible_ids.add(variant_id)
             eligible_subtotal = sum((Decimal(by_id[vid].price) * quantities[vid] for vid in eligible_ids), Decimal("0.00")).quantize(CENT, rounding=ROUND_HALF_UP)
-            customer_uses = (db.query(OfferRedemption.id).filter(OfferRedemption.offer_id == offer.id,
-                OfferRedemption.customer_id == customer.id, OfferRedemption.status == "APPLIED").count() if offer else 0)
+            customer_uses = customer_offer_uses(db, offer.id, customer.id) if offer else 0
             if (offer is None or (offer.starts_at and utc_instant(offer.starts_at) > now)
                     or (offer.ends_at and utc_instant(offer.ends_at) < now)
                     or (offer.max_uses is not None and offer.uses >= offer.max_uses)
@@ -673,6 +693,10 @@ def update_status(order_id: uuid.UUID, next_status: str, allowed: dict, staff: U
         row.ready_at = now
     elif next_status == "COMPLETED":
         row.completed_at = now
+        if row.table_id and row.payment_status == "PAID":
+            table = db.query(DiningTable).filter(DiningTable.id == row.table_id).with_for_update().first()
+            if table is not None and table.status == "occupied":
+                table.status = "available"
     if next_status in {"CANCELLED", "REJECTED"}:
         row.status_reason = reason.strip() if reason and reason.strip() else None
     record_order_event(db, row, previous_status, staff, reason)
@@ -762,9 +786,11 @@ def manager_mark_order_paid(order_id: uuid.UUID, manager: User = Depends(current
         raise HTTPException(status_code=404, detail="Order not found for this restaurant.")
     if row.payment_method != "PAY_AT_DESK" or row.status in {"CANCELLED", "REJECTED"}:
         raise HTTPException(status_code=409, detail="This order cannot be marked paid.")
+    if row.payment_status == "PAID":
+        return serialize(row, db)
     row.payment_status = "PAID"
     row.paid_at = datetime.now(timezone.utc)
-    if row.table_id is not None:
+    if row.table_id is not None and row.status == "COMPLETED":
         table = db.query(DiningTable).filter(DiningTable.id == row.table_id).with_for_update().first()
         if table is not None and table.status == "occupied":
             table.status = "available"
@@ -966,7 +992,9 @@ def validate_customer_offer(payload: OfferValidationInput, customer: User = Depe
     reservation = db.query(Reservation).filter(Reservation.id == payload.reservation_id, Reservation.user_id == customer.id).first()
     if reservation is None: raise HTTPException(status_code=404, detail="Reservation not found.")
     q = {line.variant_id: line.quantity for line in payload.items}
-    variants = db.query(FoodVariant).join(Food, FoodVariant.food_id == Food.id).join(Category, Food.category_id == Category.id).filter(FoodVariant.id.in_(q), Food.restaurant_id == reservation.restaurant_id, Food.is_available.is_(True), FoodVariant.is_available.is_(True), Food.deleted_at.is_(None), Category.is_active.is_(True), Category.deleted_at.is_(None)).all()
+    if len(q) != len(payload.items):
+        raise HTTPException(status_code=422, detail="Each menu option can only appear once in your cart.")
+    variants = db.query(FoodVariant).join(Food, FoodVariant.food_id == Food.id).join(Category, Food.category_id == Category.id).filter(FoodVariant.id.in_(q), Food.restaurant_id == reservation.restaurant_id, Food.is_available.is_(True), FoodVariant.is_available.is_(True), FoodVariant.deleted_at.is_(None), Food.deleted_at.is_(None), Category.is_active.is_(True), Category.deleted_at.is_(None)).all()
     if len(variants) != len(q): raise HTTPException(status_code=409, detail="One or more cart items are unavailable.")
     offer = db.query(FoodOrderOffer).filter(func.upper(FoodOrderOffer.code) == payload.offer_code.strip().upper(), FoodOrderOffer.restaurant_id == reservation.restaurant_id).first()
     if offer is None: raise HTTPException(status_code=422, detail="Offer code was not found.")
@@ -975,7 +1003,7 @@ def validate_customer_offer(payload: OfferValidationInput, customer: User = Depe
         matches = offer.applicability == "RESTAURANT" or (offer.applicability == "ITEMS" and str(v.food.id) in (offer.eligible_food_ids or [])) or (offer.applicability == "CATEGORIES" and str(v.food.category_id) in (offer.eligible_category_ids or []))
         if matches: items.append(Decimal(v.price) * q[v.id])
     base = sum(items, Decimal("0.00")).quantize(CENT, rounding=ROUND_HALF_UP)
-    uses = db.query(OfferRedemption.id).filter(OfferRedemption.offer_id == offer.id, OfferRedemption.customer_id == customer.id).count()
+    uses = customer_offer_uses(db, offer.id, customer.id)
     reason = None
     now = datetime.now(timezone.utc)
     if not offer.is_active: reason = "Offer is inactive."
@@ -983,6 +1011,7 @@ def validate_customer_offer(payload: OfferValidationInput, customer: User = Depe
     elif offer.ends_at and utc_instant(offer.ends_at) < now: reason = "Offer has expired."
     elif offer.max_uses is not None and offer.uses >= offer.max_uses: reason = "Offer has been fully redeemed."
     elif offer.per_customer_limit is not None and uses >= offer.per_customer_limit: reason = "You have reached the redemption limit."
+    elif base <= 0: reason = "This offer does not apply to the selected items."
     elif base < Decimal(offer.minimum_subtotal): reason = "Eligible items do not meet the minimum subtotal."
     amount = calculate_offer_discount(offer, base)
     return {"valid": reason is None, "reason": reason, "offer": offer_data(offer), "eligible_subtotal": float(base), "discount_amount": float(amount if reason is None else Decimal("0.00"))}
@@ -999,7 +1028,7 @@ def preview_customer_offer(payload: OfferPreviewInput, customer: User = Depends(
         raise HTTPException(status_code=422, detail="Each menu option can only appear once in the preorder.")
     variants = db.query(FoodVariant).join(Food, FoodVariant.food_id == Food.id).join(Category, Food.category_id == Category.id).filter(
         FoodVariant.id.in_(quantities), Food.restaurant_id == restaurant.id, Food.is_available.is_(True),
-        FoodVariant.is_available.is_(True), Food.deleted_at.is_(None), Category.is_active.is_(True), Category.deleted_at.is_(None),
+        FoodVariant.is_available.is_(True), FoodVariant.deleted_at.is_(None), Food.deleted_at.is_(None), Category.is_active.is_(True), Category.deleted_at.is_(None),
     ).all()
     if len(variants) != len(quantities):
         raise HTTPException(status_code=409, detail="One or more selected menu options are no longer available.")
@@ -1012,16 +1041,14 @@ def preview_customer_offer(payload: OfferPreviewInput, customer: User = Depends(
         if matches:
             eligible.append(Decimal(variant.price) * quantities[variant.id])
     base = sum(eligible, Decimal("0.00")).quantize(CENT, rounding=ROUND_HALF_UP)
-    redemptions = db.query(OfferRedemption.id).filter(OfferRedemption.offer_id == offer.id, OfferRedemption.customer_id == customer.id, OfferRedemption.status == "APPLIED").count()
-    claim_ids = [reservation_id for (reservation_id,) in db.query(Reservation.id).filter(Reservation.preorder_offer_id == offer.id, Reservation.user_id == customer.id, Reservation.status.in_(("PENDING_PAYMENT", "CONFIRMED", "SEATED"))).all()]
-    claims = sum(1 for reservation_id in claim_ids if not db.query(FoodOrder.id).filter(FoodOrder.idempotency_key == uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(reservation_id))).first())
+    uses = customer_offer_uses(db, offer.id, customer.id)
     reason = None
     now = datetime.now(timezone.utc)
     if not offer.is_active: reason = "Offer is inactive."
     elif offer.starts_at and utc_instant(offer.starts_at) > now: reason = "Offer is not active yet."
     elif offer.ends_at and utc_instant(offer.ends_at) < now: reason = "Offer has expired."
     elif offer.max_uses is not None and offer.uses >= offer.max_uses: reason = "Offer has been fully redeemed."
-    elif offer.per_customer_limit is not None and redemptions + claims >= offer.per_customer_limit: reason = "You have reached the redemption limit."
+    elif offer.per_customer_limit is not None and uses >= offer.per_customer_limit: reason = "You have reached the redemption limit."
     elif base <= 0: reason = "This offer does not apply to the selected items."
     elif base < Decimal(offer.minimum_subtotal): reason = "Eligible items do not meet the minimum subtotal."
     discount = calculate_offer_discount(offer, base) if reason is None else Decimal("0.00")
@@ -1035,43 +1062,6 @@ def customer_order(order_id: uuid.UUID, customer: User = Depends(current_custome
     if row is None:
         raise HTTPException(status_code=404, detail="Order not found.")
     return serialize(row, db)
-
-
-@customer_router.post("/offers/preview")
-def preview_customer_offer(payload: OfferPreviewInput, customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> dict:
-    """Preview a preorder offer before a reservation exists; creation revalidates it."""
-    restaurant = db.query(Restaurant).filter(Restaurant.id == payload.restaurant_id, Restaurant.status == RestaurantStatus.APPROVED).first()
-    if restaurant is None:
-        raise HTTPException(status_code=404, detail="Restaurant not found.")
-    quantities = {line.variant_id: line.quantity for line in payload.items}
-    if len(quantities) != len(payload.items):
-        raise HTTPException(status_code=422, detail="Each menu option can only appear once in the preorder.")
-    variants = db.query(FoodVariant).join(Food, FoodVariant.food_id == Food.id).join(Category, Food.category_id == Category.id).filter(
-        FoodVariant.id.in_(quantities), Food.restaurant_id == restaurant.id, Food.is_available.is_(True),
-        FoodVariant.is_available.is_(True), Food.deleted_at.is_(None), Category.is_active.is_(True), Category.deleted_at.is_(None),
-    ).all()
-    if len(variants) != len(quantities):
-        raise HTTPException(status_code=409, detail="One or more selected menu options are no longer available.")
-    offer = db.query(FoodOrderOffer).filter(func.upper(FoodOrderOffer.code) == payload.offer_code.strip().upper(), FoodOrderOffer.restaurant_id == restaurant.id).first()
-    if offer is None:
-        raise HTTPException(status_code=422, detail="Offer code was not found.")
-    eligible = []
-    for variant in variants:
-        if offer.applicability == "RESTAURANT" or (offer.applicability == "ITEMS" and str(variant.food.id) in offer.eligible_food_ids) or (offer.applicability == "CATEGORIES" and str(variant.food.category_id) in offer.eligible_category_ids):
-            eligible.append(Decimal(variant.price) * quantities[variant.id])
-    base = sum(eligible, Decimal("0.00")).quantize(CENT, rounding=ROUND_HALF_UP)
-    offer_uses = db.query(OfferRedemption.id).filter(OfferRedemption.offer_id == offer.id, OfferRedemption.customer_id == customer.id, OfferRedemption.status == "APPLIED").count()
-    reason = None
-    now = datetime.now(timezone.utc)
-    if not offer.is_active: reason = "Offer is inactive."
-    elif offer.starts_at and utc_instant(offer.starts_at) > now: reason = "Offer is not active yet."
-    elif offer.ends_at and utc_instant(offer.ends_at) < now: reason = "Offer has expired."
-    elif offer.max_uses is not None and offer.uses >= offer.max_uses: reason = "Offer has been fully redeemed."
-    elif offer.per_customer_limit is not None and offer_uses >= offer.per_customer_limit: reason = "You have reached the redemption limit."
-    elif base == 0: reason = "This offer does not apply to the selected items."
-    elif base < Decimal(offer.minimum_subtotal): reason = "Eligible items do not meet the minimum subtotal."
-    discount = calculate_offer_discount(offer, base) if reason is None else Decimal("0.00")
-    return {"valid": reason is None, "reason": reason, "offer": offer_data(offer), "eligible_subtotal": float(base), "discount_amount": float(discount)}
 
 
 @admin_router.get("/offers")
