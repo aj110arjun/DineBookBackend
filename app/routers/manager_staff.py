@@ -4,6 +4,7 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -11,6 +12,8 @@ from app.core.email import send_branded_email
 from app.core.security import hash_password
 from app.db.database import get_db
 from app.models.user import AccountStatus, User, UserRole
+from app.models.restaurant import Restaurant
+from app.models.restaurant_staff import RestaurantStaff
 from app.routers.manager_auth import current_manager
 
 router = APIRouter(prefix="/api/manager/staff", tags=["manager staff"])
@@ -31,8 +34,33 @@ class ChefCreateRequest(BaseModel):
         return value
 
 
+class StaffMemberCreateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        value = " ".join(value.split())
+        if len(value) < 2:
+            raise ValueError("Name must contain at least 2 characters.")
+        if any(not (character.isalpha() or character.isspace() or character in "'-. ") for character in value):
+            raise ValueError("Name may only contain letters, spaces, apostrophes, hyphens, and periods.")
+        return value
+
+
 def chef_dict(chef: User) -> dict:
     return {"id": str(chef.id), "name": chef.name, "email": chef.email, "role": chef.role.value, "status": chef.status.value, "is_active": chef.is_active}
+
+
+def staff_member_dict(member: RestaurantStaff) -> dict:
+    return {"id": str(member.id), "name": member.name, "created_at": member.created_at.isoformat()}
+
+
+def manager_restaurant_id(manager: User, db: Session):
+    restaurant_id = db.query(Restaurant.id).filter(Restaurant.manager_id == manager.id).scalar()
+    if restaurant_id is None:
+        raise HTTPException(status_code=404, detail="No restaurant is linked to this account.")
+    return restaurant_id
 
 
 def send_chef_credentials(email: str, name: str, password: str) -> None:
@@ -55,6 +83,52 @@ def send_chef_credentials(email: str, name: str, password: str) -> None:
 def list_staff(manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> list[dict]:
     staff = db.query(User).filter(User.manager_id == manager.id, User.role == UserRole.CHEF).order_by(User.created_at.desc()).all()
     return [chef_dict(chef) for chef in staff]
+
+
+@router.get("/members")
+def list_staff_members(manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> list[dict]:
+    restaurant_id = manager_restaurant_id(manager, db)
+    members = (
+        db.query(RestaurantStaff)
+        .filter(RestaurantStaff.restaurant_id == restaurant_id)
+        .order_by(func.lower(RestaurantStaff.name), RestaurantStaff.id)
+        .all()
+    )
+    return [staff_member_dict(member) for member in members]
+
+
+@router.post("/members", status_code=status.HTTP_201_CREATED)
+def add_staff_member(
+    payload: StaffMemberCreateRequest,
+    manager: User = Depends(current_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    member = RestaurantStaff(
+        restaurant_id=manager_restaurant_id(manager, db),
+        name=payload.name,
+    )
+    db.add(member)
+    db.commit()
+    db.refresh(member)
+    return staff_member_dict(member)
+
+
+@router.delete("/members/{member_id}")
+def remove_staff_member(
+    member_id: uuid.UUID,
+    manager: User = Depends(current_manager),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    restaurant_id = manager_restaurant_id(manager, db)
+    member = db.query(RestaurantStaff).filter(
+        RestaurantStaff.id == member_id,
+        RestaurantStaff.restaurant_id == restaurant_id,
+    ).first()
+    if member is None:
+        raise HTTPException(status_code=404, detail="Staff member not found.")
+    db.delete(member)
+    db.commit()
+    return {"message": "Staff member removed."}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

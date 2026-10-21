@@ -36,6 +36,7 @@ from app.models.restaurant_document import (
 )
 from app.models.restaurant_hours import RestaurantHours
 from app.models.user import AccountStatus, User, UserRole
+from app.services.notifications import create_notification
 from app.models.user import EmailVerificationCode
 
 
@@ -61,6 +62,11 @@ class ManagerEmailCodeRequest(ManagerEmailRequest):
 class ManagerLoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+
+
+class RestaurantCoordinatesRequest(BaseModel):
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
 
 
 def send_manager_verification_email(email: str, code: str) -> None:
@@ -190,6 +196,25 @@ def current_manager(
     return manager
 
 
+@router.put("/restaurant/location", response_model=dict)
+def update_manager_restaurant_location(
+    payload: RestaurantCoordinatesRequest,
+    manager: User = Depends(current_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    restaurant = db.query(Restaurant).filter(Restaurant.manager_id == manager.id).first()
+    if restaurant is None:
+        raise HTTPException(status_code=404, detail="No restaurant is linked to this account.")
+    restaurant.latitude = payload.latitude
+    restaurant.longitude = payload.longitude
+    db.commit()
+    return {
+        "latitude": float(restaurant.latitude),
+        "longitude": float(restaurant.longitude),
+        "message": "Restaurant location saved.",
+    }
+
+
 @router.post(
     "/register",
     response_model=dict,
@@ -210,6 +235,8 @@ async def register_manager(
     city: str = Form(...),
     state: str = Form(...),
     pin_code: str = Form(...),
+    latitude: float | None = Form(None, ge=-90, le=90),
+    longitude: float | None = Form(None, ge=-180, le=180),
 
     capacity: int = Form(..., gt=0),
     tables: int = Form(..., gt=0),
@@ -264,6 +291,9 @@ async def register_manager(
     city = city.strip()
     state = state.strip()
     pin_code = pin_code.strip()
+
+    if (latitude is None) != (longitude is None):
+        raise HTTPException(status_code=400, detail="Restaurant latitude and longitude must be provided together.")
 
     if len(name) < 2 or len(name) > 120:
         raise HTTPException(
@@ -357,6 +387,8 @@ async def register_manager(
         city=city,
         state=state,
         pin_code=pin_code,
+        latitude=latitude,
+        longitude=longitude,
         capacity=capacity,
         tables=tables,
         status=RestaurantStatus.PENDING,
@@ -614,6 +646,13 @@ async def register_manager(
                 )
             )
 
+        db.flush()
+        for admin in db.query(User).filter(User.role == UserRole.ADMIN, User.is_active.is_(True)).all():
+            create_notification(db, admin, notification_type="restaurant.approval_requested", category="APPROVAL",
+                title="Restaurant approval requested", message=f"{restaurant.name} submitted an onboarding application.",
+                restaurant_id=restaurant.id, entity_type="restaurant", entity_id=restaurant.id,
+                action_url="/admin/requests", priority="HIGH",
+                dedupe_key=f"restaurant:{restaurant.id}:approval-requested:{admin.id}")
         db.commit()
 
     except HTTPException:
@@ -784,6 +823,7 @@ def get_current_manager(
                 "enabled": row.enabled,
                 "open_time": row.open_time.isoformat() if row.open_time else None,
                 "close_time": row.close_time.isoformat() if row.close_time else None,
+                "periods": row.periods if row.periods is not None else ([{"opens": row.open_time.strftime("%H:%M"), "closes": row.close_time.strftime("%H:%M")}] if row.enabled and row.open_time and row.close_time else []),
             }
             for row in db.query(RestaurantHours)
             .filter(RestaurantHours.restaurant_id == restaurant.id)
@@ -796,6 +836,8 @@ def get_current_manager(
         "role": manager.role.value,
         "status": manager.status.value,
         "restaurant_name": restaurant.name if restaurant else None,
+        "restaurant_latitude": float(restaurant.latitude) if restaurant and restaurant.latitude is not None else None,
+        "restaurant_longitude": float(restaurant.longitude) if restaurant and restaurant.longitude is not None else None,
         "restaurant_hours": hours,
     }
 

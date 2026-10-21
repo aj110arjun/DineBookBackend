@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+from decimal import Decimal
 import os
 from pathlib import Path
 
@@ -25,6 +26,8 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60 * 24 * 7
     auth_cookie_secure: bool = False
     max_request_body_bytes: int = Field(default=20 * 1024 * 1024, ge=1024)
+    max_json_body_bytes: int = Field(default=1024 * 1024, ge=1024)
+    rate_limit_enabled: bool = True
     google_client_id: str | None = None
     google_client_secret: str | None = None
     cloudinary_cloud_name: str | None = None
@@ -34,6 +37,7 @@ class Settings(BaseSettings):
     razorpay_key_secret: str | None = None
     razorpay_webhook_secret: str | None = None
     razorpay_webhook_previous_secret: str | None = None
+    order_tax_percent: Decimal = Field(default=Decimal("18.00"), ge=0, le=100)
 
     model_config = SettingsConfigDict(
         # Resolve from the backend source directory so config works whether

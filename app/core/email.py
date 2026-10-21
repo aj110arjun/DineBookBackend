@@ -20,6 +20,8 @@ def send_branded_email(
     highlight_value: str | None = None,
     action_label: str | None = None,
     action_url: str | None = None,
+    summary_rows: list[tuple[str, str]] | None = None,
+    attachments: list[tuple[str, bytes, str, str]] | None = None,
 ) -> None:
     if not settings.smtp_host or not settings.smtp_from_email:
         raise HTTPException(status_code=503, detail="Email delivery is not configured. Please contact support.")
@@ -36,12 +38,21 @@ def send_branded_email(
     if action_label and action_url:
         action = f'<p style="margin:26px 0;text-align:center"><a href="{escape(action_url, quote=True)}" style="display:inline-block;padding:13px 24px;border-radius:8px;background:#6f1d2c;color:#ffffff;text-decoration:none;font-weight:700">{escape(action_label)}</a></p>'
 
+    summary = ""
+    if summary_rows:
+        rows = "".join(
+            f'<tr><td style="padding:9px 0;color:#6f625c;border-bottom:1px solid #eee7e2">{escape(label)}</td>'
+            f'<td style="padding:9px 0;color:#302a27;font-weight:700;text-align:right;border-bottom:1px solid #eee7e2">{escape(value)}</td></tr>'
+            for label, value in summary_rows
+        )
+        summary = f'<table role="presentation" width="100%" cellspacing="0" style="margin:22px 0;border-collapse:collapse;font-size:14px">{rows}</table>'
+
     html_body = f"""<!doctype html>
 <html><body style="margin:0;padding:32px 12px;background:#f5f1ec;font-family:Arial,Helvetica,sans-serif;color:#302a27">
   <div style="display:none;max-height:0;overflow:hidden;opacity:0">{escape(detail)}</div>
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #eee7e2">
     <tr><td style="padding:24px 32px;background:#6f1d2c;color:#ffffff"><div style="font-family:Georgia,serif;font-size:26px;font-weight:700;letter-spacing:.3px">DineBook</div><div style="margin-top:5px;font-size:12px;color:#f1dfe2">A seat at something special</div></td></tr>
-    <tr><td style="padding:34px 32px 26px"><div style="margin-bottom:10px;font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#9b756e">DineBook account</div><h1 style="margin:0 0 16px;font-family:Georgia,serif;font-size:28px;line-height:1.25;color:#302a27">{safe_title}</h1><p style="margin:0;font-size:16px;line-height:1.7;color:#554b46">{escape(intro)}</p>{highlight}<p style="margin:0;font-size:14px;line-height:1.75;color:#6f625c">{escape(detail)}</p>{action}<p style="margin:26px 0 0;font-size:14px;line-height:1.7;color:#554b46">Warmly,<br><strong>The DineBook team</strong></p></td></tr>
+    <tr><td style="padding:34px 32px 26px"><div style="margin-bottom:10px;font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#9b756e">DineBook account</div><h1 style="margin:0 0 16px;font-family:Georgia,serif;font-size:28px;line-height:1.25;color:#302a27">{safe_title}</h1><p style="margin:0;font-size:16px;line-height:1.7;color:#554b46">{escape(intro)}</p>{highlight}{summary}<p style="margin:0;font-size:14px;line-height:1.75;color:#6f625c">{escape(detail)}</p>{action}<p style="margin:26px 0 0;font-size:14px;line-height:1.7;color:#554b46">Warmly,<br><strong>The DineBook team</strong></p></td></tr>
     <tr><td style="padding:18px 32px;background:#fbf9f7;border-top:1px solid #eee7e2;font-size:12px;line-height:1.6;color:#8a7d76">This is an automated message from DineBook. If you did not expect this email, you can safely ignore it.</td></tr>
   </table>
 </body></html>"""
@@ -51,6 +62,8 @@ def send_branded_email(
     message["To"] = to
     message.set_content(plain_text)
     message.add_alternative(html_body, subtype="html")
+    for filename, content, maintype, subtype in attachments or []:
+        message.add_attachment(content, maintype=maintype, subtype=subtype, filename=filename)
     try:
         with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as smtp:
             if settings.smtp_use_tls:

@@ -4,23 +4,31 @@ from app.models.restaurant_document import (
     RestaurantDocument,
     RestaurantDocumentType,
 )
-from app.models.restaurant_hours import RestaurantHours
+from app.models.restaurant_hours import RestaurantHours, RestaurantHoursException
 from app.models.menu import Category, Food, FoodImage, FoodVariant
 from app.models.user import AccountStatus, EmailVerificationCode, User, UserRole
 from app.models.dining import DiningTable, Floor, RestaurantFloor
 from app.models.reservation import Reservation, ReservationTable
-from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction
+from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction, WalletTransfer
 from app.models.orders import FoodOrder, FoodOrderOffer
 from app.models.realtime import RealtimeEvent, WebhookReceipt
+from app.models.reviews import Review, ReviewFlag, ReviewReply, ReviewModerationEvent
+from app.models.notifications import Notification, NotificationPreference
+from app.models.revenue import PlatformCommission, PlatformCommissionPayout, PlatformRevenueSettings
+from app.models.restaurant_staff import RestaurantStaff
+from app.models.rate_limit import RateLimitBucket
 
 __all__ = [
     "AccountStatus",
     "EmailVerificationCode",
     "Restaurant",
     "RestaurantStatus",
+    "RestaurantStaff",
+    "RateLimitBucket",
     "RestaurantDocument",
     "RestaurantDocumentType",
     "RestaurantHours",
+    "RestaurantHoursException",
     "Category",
     "Food",
     "FoodImage",
@@ -33,10 +41,20 @@ __all__ = [
     "WalletAccount",
     "WalletTopUp",
     "WalletTransaction",
+    "WalletTransfer",
     "FoodOrder",
     "FoodOrderOffer",
     "RealtimeEvent",
     "WebhookReceipt",
+    "Review",
+    "ReviewFlag",
+    "ReviewReply",
+    "ReviewModerationEvent",
+    "Notification",
+    "NotificationPreference",
+    "PlatformRevenueSettings",
+    "PlatformCommission",
+    "PlatformCommissionPayout",
     "User",
     "UserRole",
 ]

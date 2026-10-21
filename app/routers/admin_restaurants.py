@@ -10,6 +10,7 @@ from app.models.restaurant_document import RestaurantDocument
 from app.models.restaurant_hours import RestaurantHours
 from app.models.menu import Category, Food
 from app.models.user import User, UserRole
+from app.services.notifications import create_notification
 from app.core.email import send_branded_email
 from app.routers.admin_auth import current_admin
 
@@ -33,6 +34,10 @@ def suspend_restaurant(restaurant_id: uuid.UUID, payload: SuspensionRequest,
     if restaurant.status != RestaurantStatus.APPROVED:
         raise HTTPException(status_code=409, detail="Only approved restaurants can be suspended.")
     restaurant.status = RestaurantStatus.SUSPENDED
+    create_notification(db, manager, notification_type="restaurant.suspended", category="SYSTEM",
+        title="Restaurant temporarily suspended", message="Your restaurant access was suspended by platform administration.",
+        restaurant_id=restaurant.id, entity_type="restaurant", entity_id=restaurant.id,
+        action_url="/manager/pending", priority="CRITICAL", dedupe_key=f"restaurant:{restaurant.id}:suspended")
     db.commit()
     reason = payload.reason.strip() or "Please contact DineBook support for more information."
     email_sent = False
@@ -57,6 +62,12 @@ def resume_restaurant(restaurant_id: uuid.UUID, admin: User = Depends(current_ad
     if restaurant.status != RestaurantStatus.SUSPENDED:
         raise HTTPException(status_code=409, detail="Restaurant is not suspended.")
     restaurant.status = RestaurantStatus.APPROVED
+    manager = db.query(User).filter_by(id=restaurant.manager_id).first()
+    if manager:
+        create_notification(db, manager, notification_type="restaurant.reactivated", category="SYSTEM",
+            title="Restaurant reactivated", message="Your restaurant access has been restored.",
+            restaurant_id=restaurant.id, entity_type="restaurant", entity_id=restaurant.id,
+            action_url="/manager/dashboard", dedupe_key=f"restaurant:{restaurant.id}:reactivated")
     db.commit()
     return {"id": str(restaurant.id), "status": restaurant.status.value}
 
@@ -194,6 +205,7 @@ def get_restaurant_details(
                 "enabled": hour.enabled,
                 "opens": hour.open_time.strftime("%H:%M") if hour.open_time else None,
                 "closes": hour.close_time.strftime("%H:%M") if hour.close_time else None,
+                "periods": hour.periods if hour.periods is not None else ([{"opens": hour.open_time.strftime("%H:%M"), "closes": hour.close_time.strftime("%H:%M")}] if hour.enabled and hour.open_time and hour.close_time else []),
             }
             for hour in hours
         ],
