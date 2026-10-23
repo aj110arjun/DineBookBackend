@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -11,7 +12,7 @@ from app.models.menu import Category, Food, FoodImage, FoodVariant
 from app.core.cloudinary import delete_file, upload_file
 from app.models.restaurant import Restaurant
 from app.models.user import User
-from app.routers.manager_auth import current_manager
+from app.routers.auth.manager_auth import current_manager
 
 router = APIRouter(prefix="/api/manager/menu", tags=["manager menu"])
 MAX_MENU_IMAGE_SIZE = 10 * 1024 * 1024
@@ -83,7 +84,7 @@ def food_dict(food: Food, restaurant_name: str | None = None) -> dict:
 
 class VariantPayload(BaseModel):
     name: str = Field(min_length=1, max_length=100)
-    price: float = Field(ge=0, le=99999999.99)
+    price: Decimal = Field(ge=0, le=Decimal("99999999.99"), max_digits=10, decimal_places=2)
     is_available: bool = True
 
     @field_validator("name")

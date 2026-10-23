@@ -11,9 +11,9 @@ from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.restaurant_hours import RestaurantHours, RestaurantHoursException
 from app.models.reservation import Reservation
 from app.models.user import User
-from app.routers.admin_auth import current_admin
-from app.routers.chef_auth import current_chef
-from app.routers.manager_auth import current_manager
+from app.routers.auth.admin_auth import current_admin
+from app.routers.auth.chef_auth import current_chef
+from app.routers.auth.manager_auth import current_manager
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 RESTAURANT_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
@@ -38,6 +38,13 @@ admin_router = APIRouter(prefix="/api/admin/restaurants", tags=["admin operating
 class Period(BaseModel):
     opens: time
     closes: time
+
+    @field_validator("opens", "closes")
+    @classmethod
+    def local_minute(cls, value: time) -> time:
+        if value.tzinfo is not None or value.second or value.microsecond:
+            raise ValueError("Use local restaurant times with minute precision and no timezone offset.")
+        return value
 
     @model_validator(mode="after")
     def valid_interval(self):
@@ -396,7 +403,7 @@ def admin_availability_inspection(restaurant_id: uuid.UUID, reservation_date: da
     if reservation_date <= restaurant_today():
         result["reason"] = "New reservations must be made at least one day in advance."
         return result
-    from app.routers.reservations import suitable_table_groups, table_group_data
+    from app.routers.restaurants.reservations import suitable_table_groups, table_group_data
     groups = suitable_table_groups(db, restaurant_id, reservation_date, start_time, number_of_guests)
     result["available"] = bool(groups)
     result["tables"] = [table_group_data(group) for group in groups]

@@ -20,7 +20,7 @@ from app.models.reservation import Reservation
 from app.services.notifications import create_notification
 from app.services.reservation_email import send_reservation_confirmation
 from app.services.restaurant_wallet import record_restaurant_payment
-from app.routers.reservations import cancel_reservation_record
+from app.routers.restaurants.reservations import cancel_reservation_record
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 logger = logging.getLogger(__name__)
@@ -100,6 +100,10 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
             receipt.outcome = "IGNORED"
             db.commit()
             return {"status": "ignored"}
+        if (not isinstance(order_id, str) or not order_id or len(order_id) > 80
+                or not isinstance(payment_id, str) or not payment_id or len(payment_id) > 80):
+            db.rollback()
+            raise HTTPException(status_code=400, detail="Failed payment data is invalid.")
         failed_reservation = db.query(Reservation).filter(Reservation.razorpay_order_id == order_id).with_for_update().first()
         if failed_reservation and failed_reservation.payment_status != "PAID":
             cancel_reservation_record(db, failed_reservation, None, "Reservation payment failed.")

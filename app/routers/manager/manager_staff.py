@@ -14,7 +14,7 @@ from app.db.database import get_db
 from app.models.user import AccountStatus, User, UserRole
 from app.models.restaurant import Restaurant
 from app.models.restaurant_staff import RestaurantStaff
-from app.routers.manager_auth import current_manager
+from app.routers.auth.manager_auth import current_manager
 
 router = APIRouter(prefix="/api/manager/staff", tags=["manager staff"])
 

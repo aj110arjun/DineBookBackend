@@ -12,7 +12,7 @@ from app.models.reservation import Reservation
 from app.models.restaurant import Restaurant
 from app.models.user import User
 from app.models.wallet import WalletTopUp, WalletTransaction
-from app.routers.customer_auth import current_customer
+from app.routers.auth.customer_auth import current_customer
 
 router = APIRouter(prefix="/api/customer", tags=["customer transactions"])
 

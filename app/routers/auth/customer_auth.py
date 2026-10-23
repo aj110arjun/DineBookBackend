@@ -7,14 +7,14 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.email import send_branded_email
 from app.core.otp import verification_code_expired
-from app.core.security import create_access_token, decode_access_token, hash_password, verify_secret
+from app.core.security import create_access_token, decode_access_token, hash_password, verify_secret, session_is_current, validate_new_password
 from app.db.database import get_db
 from app.models.user import AccountStatus, EmailVerificationCode, User, UserRole
 from app.schemas.customer import CustomerRegisterRequest, CustomerResponse
@@ -57,6 +57,24 @@ class CustomerEmailRequest(BaseModel):
 
 class CustomerPasswordResetRequest(CustomerEmailCodeRequest):
     new_password: str = Field(min_length=10, max_length=128)
+
+    _password_policy = field_validator("new_password")(validate_new_password)
+
+
+class CustomerPasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=10, max_length=128)
+    confirm_password: str = Field(min_length=10, max_length=128)
+
+    _password_policy = field_validator("new_password")(validate_new_password)
+
+    @model_validator(mode="after")
+    def passwords_match(self):
+        if self.new_password != self.confirm_password:
+            raise ValueError("Passwords do not match.")
+        if self.current_password == self.new_password:
+            raise ValueError("Choose a password different from your current password.")
+        return self
 
 
 def send_verification_email(email: str, code: str) -> None:
@@ -131,6 +149,7 @@ def reset_customer_password(payload: CustomerPasswordResetRequest, db: Session =
     if not verify_secret(payload.code, verification.code_hash):
         raise HTTPException(status_code=400, detail="That reset code is incorrect.")
     customer.password_hash = hash_password(payload.new_password)
+    customer.password_changed_at = datetime.now(timezone.utc)
     db.delete(verification)
     db.commit()
     return {"message": "Your password has been reset. You can now sign in."}
@@ -144,13 +163,30 @@ def current_customer(
     if not token:
         raise unauthorized
     try:
-        customer_id = uuid.UUID(decode_access_token(token).get("sub"))
+        claims = decode_access_token(token)
+        customer_id = uuid.UUID(claims.get("sub"))
     except (ValueError, TypeError, AttributeError):
         raise unauthorized
     customer = db.query(User).filter(User.id == customer_id, User.role == UserRole.CUSTOMER).first()
-    if customer is None or not customer.is_active or not customer.email_verified:
+    if customer is None or customer.status != AccountStatus.ACTIVE or not customer.is_active or not customer.email_verified or not session_is_current(claims, customer):
         raise unauthorized
+    customer.can_change_email = claims.get("auth_method") == "password"
+    customer.auth_method = claims.get("auth_method")
     return customer
+
+
+@router.post("/change-password")
+def change_customer_password(payload: CustomerPasswordChangeRequest, response: Response,
+                             customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> dict:
+    if not verify_secret(payload.current_password, customer.password_hash):
+        raise HTTPException(status_code=400, detail="Your current password is incorrect.")
+    customer.password_hash = hash_password(payload.new_password)
+    customer.password_changed_at = datetime.now(timezone.utc)
+    db.commit()
+    token, _ = create_access_token(str(customer.id), auth_method=customer.auth_method)
+    response.set_cookie(key=ACCESS_COOKIE, value=token, max_age=settings.jwt_expire_minutes * 60,
+                        httponly=True, secure=settings.auth_cookie_secure, samesite="lax", path="/")
+    return {"message": "Your password has been updated."}
 
 
 @router.post("/login", response_model=CustomerResponse)
@@ -159,12 +195,13 @@ def login_customer(payload: CustomerLoginRequest, response: Response, db: Sessio
     customer = db.query(User).filter(User.email == email, User.role == UserRole.CUSTOMER).first()
     if customer is None or not verify_secret(payload.password, customer.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
-    if not customer.is_active:
+    if not customer.is_active or customer.status != AccountStatus.ACTIVE:
         raise HTTPException(status_code=403, detail="Your account is not active.")
     if not customer.email_verified:
         raise HTTPException(status_code=403, detail="Confirm your email address before signing in.")
-    token, _ = create_access_token(str(customer.id))
+    token, _ = create_access_token(str(customer.id), auth_method="password")
     response.set_cookie(ACCESS_COOKIE, token, max_age=settings.jwt_expire_minutes * 60, httponly=True, secure=settings.auth_cookie_secure, samesite="lax", path="/")
+    customer.can_change_email = True
     return customer
 
 
@@ -280,7 +317,7 @@ if (window.opener) {{
 
     customer = db.query(User).filter(User.email == email).first()
     if customer is not None:
-        if customer.role != UserRole.CUSTOMER or not customer.is_active:
+        if customer.role != UserRole.CUSTOMER or not customer.is_active or customer.status != AccountStatus.ACTIVE:
             return popup_result("unavailable")
         customer.email_verified = True
         if not customer.name and profile.get("name"):
@@ -302,9 +339,9 @@ if (window.opener) {{
     except IntegrityError:
         db.rollback()
         customer = db.query(User).filter(User.email == email, User.role == UserRole.CUSTOMER).first()
-        if customer is None or not customer.is_active:
+        if customer is None or not customer.is_active or customer.status != AccountStatus.ACTIVE:
             return popup_result("unavailable")
-    token, _ = create_access_token(str(customer.id))
+    token, _ = create_access_token(str(customer.id), auth_method="google")
     return popup_result("success", token)
 
 

@@ -5,7 +5,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.security import create_access_token, verify_secret
+from app.core.security import create_access_token, verify_secret, session_is_current
 from app.db.database import get_db
 from app.models.user import AccountStatus, User, UserRole
 
@@ -88,7 +88,8 @@ def current_admin(
     try:
         from app.core.security import decode_access_token
 
-        subject = decode_access_token(token).get("sub")
+        claims = decode_access_token(token)
+        subject = claims.get("sub")
         admin_id = uuid.UUID(subject)
 
         admin = (
@@ -108,6 +109,7 @@ def current_admin(
         or admin.status != AccountStatus.ACTIVE
         or not admin.is_active
         or not admin.email_verified
+        or not session_is_current(claims, admin)
     ):
         raise unauthorized
 

@@ -171,10 +171,36 @@ DineBookBackend/
 │   ├── core/          # Settings, JWT/password helpers, SMTP, Cloudinary
 │   ├── db/            # SQLAlchemy engine and request sessions
 │   ├── models/        # Users, restaurants, menu, floors, and tables
-│   ├── routers/       # Customer, manager, chef, admin, and discovery APIs
+│   ├── routers/
+│   │   ├── auth/         # Portal authentication, sessions, password recovery
+│   │   ├── admin/        # Administrator manager and restaurant management
+│   │   ├── manager/      # Manager menu and staff management
+│   │   ├── customer/     # Customer restaurant discovery and transactions
+│   │   ├── restaurants/  # Dining, operating hours, reservations, reviews
+│   │   ├── commerce/     # Orders, payments, revenue, wallets, webhooks
+│   │   └── events/       # Notifications and realtime streams
 │   └── schemas/       # Shared request/response schemas
 ├── alembic/versions/  # Versioned PostgreSQL schema changes
 ├── .env.example
 ├── alembic.ini
 └── requirements.txt
 ```
+
+## Local demo data
+
+From `DineBookBackend`, run `venv/bin/python -m app.seed_demo`. This inserts missing demo records in one transaction, preserves existing accounts and edits, and refuses to run outside development/test environments. Repeating the command does not duplicate records or reset demo passwords, dates, balances, or read notifications. No email, upload, or payment-provider requests are made.
+
+The fixtures include 4 restaurants (3 approved, 1 pending), 4 managers, 8 linked chefs, 4 customers, a separate demo admin, staff rosters, opening hours, floors/tables, menus, offers, reservations, orders, reviews/replies, wallet ledgers, and read/unread notifications. Sample money is for local testing only. Sample images and legal documents are not included.
+
+All demo accounts initially use password `DineBookDemo123!`:
+
+| Role | Email |
+| --- | --- |
+| Administrator | `demo.admin@example.com` |
+| Customer | `demo.customer1@example.com` through `demo.customer4@example.com` |
+| Manager | `demo.manager1@example.com` through `demo.manager4@example.com` |
+| Chef | `demo.chef11@example.com`, `demo.chef12@example.com` (manager 1); similarly `21/22`, `31/32`, `41/42` |
+
+Manager 4 owns the pending restaurant for testing approval workflows. Use manager 1 and chef 11 for an approved restaurant with active orders. The existing administrator account is preserved.
+
+Validate fixtures with `venv/bin/python -m unittest discover -s tests -p test_seed_demo.py`.

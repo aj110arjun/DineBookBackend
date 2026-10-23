@@ -10,10 +10,10 @@ from app.core.security import decode_access_token
 from app.db.database import get_db
 from app.models.notifications import Notification, NotificationPreference
 from app.models.user import AccountStatus, User, UserRole
-from app.routers.admin_auth import ACCESS_COOKIE, current_admin
-from app.routers.chef_auth import current_chef
-from app.routers.customer_auth import current_customer
-from app.routers.manager_auth import current_manager
+from app.routers.auth.admin_auth import ACCESS_COOKIE, current_admin
+from app.routers.auth.chef_auth import current_chef
+from app.routers.auth.customer_auth import current_customer
+from app.routers.auth.manager_auth import current_manager
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 CATEGORIES = {"RESERVATION", "ORDER", "PAYMENT", "REVIEW", "STAFF", "APPROVAL", "SYSTEM"}

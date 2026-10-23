@@ -1,5 +1,7 @@
 import unittest
+from tests import sqlite_support
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine
@@ -10,7 +12,7 @@ from app.models.restaurant import Restaurant
 from app.models.orders import FoodOrder
 from app.models.reviews import Review, ReviewFlag, ReviewModerationEvent
 from app.models.user import User, UserRole
-from app.routers.reviews import ActionPayload, ReviewPayload, create_review, update_review, moderate
+from app.routers.restaurants.reviews import ActionPayload, ReviewPayload, FlagPayload, create_review, update_review, moderate, flag_review, manager_flag_review, manager_router, delete_own_review, public_reviews
 
 
 class ReviewModerationTests(unittest.TestCase):
@@ -83,6 +85,70 @@ class ReviewModerationTests(unittest.TestCase):
         self.db.add(order); self.db.commit()
         with self.assertRaises(HTTPException) as caught:
             create_review(ReviewPayload(order_id=order.id, rating=5, content="Too soon"), self.customer, self.db)
+        self.assertEqual(caught.exception.status_code, 409)
+
+    def test_customer_can_review_restaurant_without_order(self):
+        self.db.delete(self.flag); self.db.delete(self.review); self.db.commit()
+        created = create_review(ReviewPayload(restaurant_id=self.restaurant.id, rating=5, content="Wonderful restaurant"), self.customer, self.db)
+        self.assertIsNone(created["order_id"])
+        self.assertEqual(created["restaurant_id"], str(self.restaurant.id))
+
+    def test_manager_can_flag_but_not_delete_a_review(self):
+        result = manager_flag_review(self.review.id, FlagPayload(reason="ABUSIVE", explanation="Contains profanity"), self.manager, self.db)
+        self.assertEqual(result["status"], "PENDING")
+        self.assertEqual(self.review.status, "PUBLISHED")
+        self.assertFalse(any(route.path.endswith("/{review_id}") and "DELETE" in route.methods for route in manager_router.routes))
+        self.assertFalse(any(route.path.endswith("/{review_id}/reply") for route in manager_router.routes))
+
+    def test_manager_flag_blocks_new_review_for_24_hours(self):
+        manager_flag_review(self.review.id, FlagPayload(reason="ABUSIVE"), self.manager, self.db)
+        with self.assertRaises(HTTPException) as caught:
+            create_review(ReviewPayload(restaurant_id=self.restaurant.id, rating=5, content="A new review"), self.customer, self.db)
+        self.assertEqual(caught.exception.status_code, 429)
+        self.assertIn("24 hours", caught.exception.detail)
+
+    def test_customer_can_submit_again_after_removed_review_cooldown(self):
+        manager_flag = manager_flag_review(self.review.id, FlagPayload(reason="ABUSIVE"), self.manager, self.db)
+        flag = self.db.query(ReviewFlag).filter_by(id=uuid.UUID(manager_flag["id"])).one()
+        self.review.status = "REMOVED"
+        flag.created_at = datetime.now(timezone.utc) - timedelta(hours=25)
+        self.db.commit()
+        created = create_review(ReviewPayload(restaurant_id=self.restaurant.id, rating=5, content="A new review"), self.customer, self.db)
+        self.assertEqual(created["content"], "A new review")
+        self.assertEqual(created["status"], "PUBLISHED")
+
+    def test_only_pending_manager_flag_allows_admin_removal(self):
+        with self.assertRaises(HTTPException) as caught:
+            moderate(self.review.id, ActionPayload(action="DELETE", reason="Contains profanity"), self.admin, self.db)
+        self.assertEqual(caught.exception.status_code, 409)
+        manager_flag = manager_flag_review(self.review.id, FlagPayload(reason="ABUSIVE"), self.manager, self.db)
+        flag = self.db.query(ReviewFlag).filter_by(id=uuid.UUID(manager_flag["id"])).one()
+        result = moderate(self.review.id, ActionPayload(action="DELETE", reason="Contains abusive words", flag_id=flag.id), self.admin, self.db)
+        self.assertEqual(result["status"], "REMOVED")
+
+    def test_admin_removed_review_is_excluded_from_public_reviews(self):
+        manager_flag = manager_flag_review(self.review.id, FlagPayload(reason="ABUSIVE"), self.manager, self.db)
+        flag = self.db.query(ReviewFlag).filter_by(id=uuid.UUID(manager_flag["id"])).one()
+        moderate(self.review.id, ActionPayload(action="DELETE", reason="Contains abusive words", flag_id=flag.id), self.admin, self.db)
+        result = public_reviews(self.restaurant.id, self.db, limit=20, offset=0)
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["total"], 0)
+        self.assertIsNone(result["average_rating"])
+        self.assertEqual(self.review.status, "REMOVED")
+        self.assertEqual(flag.status, "RESOLVED")
+
+    def test_customer_can_delete_own_review_and_related_flags(self):
+        result = delete_own_review(self.review.id, self.customer, self.db)
+        self.assertEqual(result["message"], "Your review was deleted.")
+        self.assertIsNone(self.db.get(Review, self.review.id))
+        self.assertEqual(self.db.query(ReviewFlag).filter_by(review_id=self.review.id).count(), 0)
+
+    def test_duplicate_report_returns_conflict_instead_of_database_error(self):
+        other = User(name="Reporter", email="reporter@example.com", password_hash="x", role=UserRole.CUSTOMER)
+        self.db.add(other); self.db.commit()
+        flag_review(self.review.id, FlagPayload(reason="SPAM"), other, self.db)
+        with self.assertRaises(HTTPException) as caught:
+            flag_review(self.review.id, FlagPayload(reason="SPAM"), other, self.db)
         self.assertEqual(caught.exception.status_code, 409)
 
 

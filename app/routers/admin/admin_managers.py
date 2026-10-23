@@ -14,7 +14,7 @@ from app.services.notifications import create_notification
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.restaurant_document import RestaurantDocument
 from app.models.restaurant_hours import RestaurantHours
-from app.routers.admin_auth import current_admin
+from app.routers.auth.admin_auth import current_admin
 
 
 router = APIRouter(

@@ -10,8 +10,8 @@ from app.models.reservation import Reservation
 from app.models.orders import FoodOrder
 from app.models.restaurant import Restaurant
 from app.models.user import User
-from app.routers.admin_auth import current_admin
-from app.routers.manager_auth import current_manager
+from app.routers.auth.admin_auth import current_admin
+from app.routers.auth.manager_auth import current_manager
 
 manager_router = APIRouter(prefix="/api/manager/payments", tags=["manager payments"])
 admin_router = APIRouter(prefix="/api/admin/restaurants/{restaurant_id}/payments", tags=["admin restaurant payments"])

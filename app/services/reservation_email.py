@@ -8,6 +8,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.core.email import send_branded_email
+from app.db.database import SessionLocal
 from app.models.dining import DiningTable
 from app.models.reservation import Reservation, ReservationTable
 from app.models.restaurant import Restaurant
@@ -15,6 +16,12 @@ from app.models.user import User
 from app.services.reservation_invoice_pdf import build_reservation_invoice_pdf
 
 logger = logging.getLogger(__name__)
+
+
+def send_reservation_confirmation_in_background(reservation_id: uuid.UUID) -> bool:
+    """Send confirmation using a session owned by the background task."""
+    with SessionLocal() as db:
+        return send_reservation_confirmation(db, reservation_id)
 
 
 def _money(value: Decimal | float | int | None) -> str:

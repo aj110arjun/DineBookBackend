@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from decimal import Decimal
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -11,9 +11,9 @@ from app.db.database import get_db
 from app.models.dining import DiningTable, DiningTableType, RestaurantFloor
 from app.models.restaurant import Restaurant
 from app.models.user import User
-from app.routers.admin_auth import current_admin
-from app.routers.chef_auth import current_chef
-from app.routers.manager_auth import current_manager
+from app.routers.auth.admin_auth import current_admin
+from app.routers.auth.chef_auth import current_chef
+from app.routers.auth.manager_auth import current_manager
 
 manager_router = APIRouter(prefix="/api/manager", tags=["manager floors and tables"])
 chef_router = APIRouter(prefix="/api/chef/floors", tags=["chef floors and tables"])
@@ -39,6 +39,12 @@ class FloorUpdate(BaseModel):
     floor_name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=1000)
     is_active: bool | None = None
+
+    @model_validator(mode="after")
+    def reject_null_required_fields(self):
+        if any(getattr(self, key) is None for key in self.model_fields_set - {"description"}):
+            raise ValueError("Floor number, name, and active state cannot be null.")
+        return self
 
     @field_validator("floor_name")
     @classmethod
@@ -75,6 +81,12 @@ class TableUpdate(BaseModel):
     reservation_fee: Decimal | None = Field(default=None, ge=0, le=100000)
     table_type: DiningTableType | None = None
     status: str | None = Field(default=None, pattern="^(available|reserved|occupied|maintenance|inactive)$")
+
+    @model_validator(mode="after")
+    def reject_null_required_fields(self):
+        if any(getattr(self, key) is None for key in self.model_fields_set):
+            raise ValueError("Table fields cannot be null; omit fields you do not want to change.")
+        return self
 
     @field_validator("table_number")
     @classmethod
