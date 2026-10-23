@@ -12,7 +12,7 @@ from app.models.menu import Category, Food
 from app.models.user import User, UserRole
 from app.services.notifications import create_notification
 from app.core.email import send_branded_email
-from app.routers.admin_auth import current_admin
+from app.routers.auth.admin_auth import current_admin
 
 
 router = APIRouter(prefix="/api/admin/restaurants", tags=["admin restaurants"])

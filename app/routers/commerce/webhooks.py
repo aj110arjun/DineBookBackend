@@ -20,7 +20,7 @@ from app.models.reservation import Reservation
 from app.services.notifications import create_notification
 from app.services.reservation_email import send_reservation_confirmation
 from app.services.restaurant_wallet import record_restaurant_payment
-from app.routers.reservations import cancel_reservation_record
+from app.routers.restaurants.reservations import cancel_reservation_record
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 logger = logging.getLogger(__name__)

@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -20,10 +21,10 @@ from app.models.wallet import WalletAccount, WalletTransaction
 from app.models.realtime import RealtimeEvent
 from app.services.notifications import notify_order_status
 from app.services.restaurant_wallet import record_restaurant_payment, reverse_restaurant_payment
-from app.routers.admin_auth import current_admin
-from app.routers.chef_auth import current_chef
-from app.routers.customer_auth import current_customer
-from app.routers.manager_auth import current_manager
+from app.routers.auth.admin_auth import current_admin
+from app.routers.auth.chef_auth import current_chef
+from app.routers.auth.customer_auth import current_customer
+from app.routers.auth.manager_auth import current_manager
 
 customer_router = APIRouter(prefix="/api/customer/orders", tags=["customer orders"])
 customer_reservation_orders_router = APIRouter(prefix="/api/customer/reservations", tags=["reservation orders"])
@@ -183,6 +184,7 @@ class OfferInput(BaseModel):
     max_uses: int | None = Field(default=None, gt=0)
     starts_at: datetime | None = None
     ends_at: datetime | None = None
+    timezone_name: str | None = Field(default=None, max_length=100)
     title: str = Field(default="Offer", min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=1000)
     discount_type: str = Field(default="PERCENTAGE", pattern="^(PERCENTAGE|FIXED)$")
@@ -199,8 +201,23 @@ class OfferInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_rules(self):
-        if self.starts_at and self.ends_at and self.ends_at <= self.starts_at:
-            raise ValueError("Offer end time must be after its start time.")
+        try:
+            local_timezone = ZoneInfo(self.timezone_name) if self.timezone_name else timezone.utc
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("Provide a valid timezone for offer dates.") from exc
+        today = datetime.now(local_timezone).date()
+        start_date = self.starts_at.astimezone(local_timezone).date() if self.starts_at else None
+        end_date = self.ends_at.astimezone(local_timezone).date() if self.ends_at else None
+        if start_date and start_date < today:
+            raise ValueError("Offer start date cannot be in the past.")
+        if end_date and end_date < today:
+            raise ValueError("Offer end date cannot be in the past.")
+        if start_date and end_date and end_date < start_date:
+            raise ValueError("Offer end date must be the same as or later than its start date.")
+        if start_date:
+            self.starts_at = datetime.combine(start_date, datetime.min.time(), tzinfo=local_timezone).astimezone(timezone.utc)
+        if end_date:
+            self.ends_at = datetime.combine(end_date, datetime.max.time(), tzinfo=local_timezone).astimezone(timezone.utc)
         if self.applicability == "ITEMS" and self.eligible_category_ids:
             raise ValueError("Item offers cannot include category selections.")
         if self.applicability == "CATEGORIES" and self.eligible_food_ids:

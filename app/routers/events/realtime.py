@@ -15,11 +15,11 @@ from app.db.database import SessionLocal
 from app.models.realtime import RealtimeEvent
 from app.models.restaurant import Restaurant
 from app.models.user import User, UserRole
-from app.routers.admin_auth import ACCESS_COOKIE as AUTH_COOKIE
-from app.routers.chef_auth import current_chef
-from app.routers.customer_auth import current_customer
-from app.routers.admin_auth import current_admin
-from app.routers.manager_auth import current_manager
+from app.routers.auth.admin_auth import ACCESS_COOKIE as AUTH_COOKIE
+from app.routers.auth.chef_auth import current_chef
+from app.routers.auth.customer_auth import current_customer
+from app.routers.auth.admin_auth import current_admin
+from app.routers.auth.manager_auth import current_manager
 
 router = APIRouter(prefix="/api/events", tags=["realtime events"])
 logger = logging.getLogger(__name__)

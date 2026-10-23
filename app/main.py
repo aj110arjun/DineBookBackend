@@ -21,19 +21,19 @@ from app.routers import (
     manager_menu_router,
     password_recovery_router,
 )
-from app.routers.dining import admin_router as admin_dining_router, chef_router as chef_dining_router, customer_router as customer_dining_router, manager_router as manager_dining_router
-from app.routers.reservations import customer_router as customer_reservations_router, manager_router as manager_reservations_router, manager_calendar_router, chef_router as chef_reservations_router
-from app.routers.customer_auth import session_router
-from app.routers.wallet import customer_router as customer_wallet_router, admin_router as admin_wallet_router, manager_router as manager_wallet_router, chef_wallet_router
-from app.routers.orders import customer_router as customer_orders_router, customer_reservation_orders_router, manager_router as manager_orders_router, manager_reservation_orders_router, chef_router as chef_orders_router, chef_reservation_orders_router, admin_router as admin_orders_router
-from app.routers.webhooks import router as webhooks_router
-from app.routers.payments import manager_router as manager_payments_router, admin_router as admin_payments_router
-from app.routers.realtime import router as realtime_router
-from app.routers.notifications import router as notifications_router
-from app.routers.operating_hours import admin_router as admin_operating_hours_router, chef_router as chef_operating_hours_router, customer_router as customer_operating_hours_router, manager_router as manager_operating_hours_router
-from app.routers.customer_transactions import router as customer_transactions_router
-from app.routers.reviews import customer_router as customer_reviews_router, public_router as public_reviews_router, chef_router as chef_reviews_router, manager_router as manager_reviews_router, admin_router as admin_reviews_router
-from app.routers.revenue import admin_router as admin_revenue_router, manager_router as manager_revenue_router, chef_router as chef_revenue_router
+from app.routers.restaurants.dining import admin_router as admin_dining_router, chef_router as chef_dining_router, customer_router as customer_dining_router, manager_router as manager_dining_router
+from app.routers.restaurants.reservations import customer_router as customer_reservations_router, manager_router as manager_reservations_router, manager_calendar_router, chef_router as chef_reservations_router
+from app.routers.auth.customer_auth import session_router
+from app.routers.commerce.wallet import customer_router as customer_wallet_router, admin_router as admin_wallet_router, manager_router as manager_wallet_router, chef_wallet_router
+from app.routers.commerce.orders import customer_router as customer_orders_router, customer_reservation_orders_router, manager_router as manager_orders_router, manager_reservation_orders_router, chef_router as chef_orders_router, chef_reservation_orders_router, admin_router as admin_orders_router
+from app.routers.commerce.webhooks import router as webhooks_router
+from app.routers.commerce.payments import manager_router as manager_payments_router, admin_router as admin_payments_router
+from app.routers.events.realtime import router as realtime_router
+from app.routers.events.notifications import router as notifications_router
+from app.routers.restaurants.operating_hours import admin_router as admin_operating_hours_router, chef_router as chef_operating_hours_router, customer_router as customer_operating_hours_router, manager_router as manager_operating_hours_router
+from app.routers.customer.customer_transactions import router as customer_transactions_router
+from app.routers.restaurants.reviews import customer_router as customer_reviews_router, public_router as public_reviews_router, chef_router as chef_reviews_router, manager_router as manager_reviews_router, admin_router as admin_reviews_router
+from app.routers.commerce.revenue import admin_router as admin_revenue_router, manager_router as manager_revenue_router, chef_router as chef_revenue_router
 
 
 app = FastAPI(title="DineBook API", version="0.1.0")

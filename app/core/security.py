@@ -4,14 +4,15 @@ import hmac
 import json
 import time
 import math
-import binascii
+import binascii\
+
 from datetime import datetime, timedelta, timezone
 
 from pwdlib import PasswordHash
 from app.core.config import settings
 
-_password_hash = PasswordHash.recommended()
 
+_password_hash = PasswordHash.recommended()
 
 def hash_password(password: str) -> str:
     return _password_hash.hash(password)
@@ -24,11 +25,12 @@ def verify_secret(secret: str, secret_hash: str) -> bool:
         return False
 
 
-def create_access_token(subject: str) -> tuple[str, datetime]:
+def create_access_token(subject: str, *, auth_method: str | None = None) -> tuple[str, datetime]:
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expire_minutes)
     header = _base64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
     payload = _base64url(json.dumps({
         "sub": subject, "iat": time.time(), "exp": int(expires_at.timestamp()),
+        **({"auth_method": auth_method} if auth_method else {}),
         "iss": settings.jwt_issuer, "aud": settings.jwt_audience, "typ": "access",
     }, separators=(",", ":")).encode())
     signing_input = f"{header}.{payload}"

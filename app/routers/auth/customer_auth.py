@@ -170,6 +170,8 @@ def current_customer(
     customer = db.query(User).filter(User.id == customer_id, User.role == UserRole.CUSTOMER).first()
     if customer is None or customer.status != AccountStatus.ACTIVE or not customer.is_active or not customer.email_verified or not session_is_current(claims, customer):
         raise unauthorized
+    customer.can_change_email = claims.get("auth_method") == "password"
+    customer.auth_method = claims.get("auth_method")
     return customer
 
 
@@ -181,7 +183,7 @@ def change_customer_password(payload: CustomerPasswordChangeRequest, response: R
     customer.password_hash = hash_password(payload.new_password)
     customer.password_changed_at = datetime.now(timezone.utc)
     db.commit()
-    token, _ = create_access_token(str(customer.id))
+    token, _ = create_access_token(str(customer.id), auth_method=customer.auth_method)
     response.set_cookie(key=ACCESS_COOKIE, value=token, max_age=settings.jwt_expire_minutes * 60,
                         httponly=True, secure=settings.auth_cookie_secure, samesite="lax", path="/")
     return {"message": "Your password has been updated."}
@@ -197,8 +199,9 @@ def login_customer(payload: CustomerLoginRequest, response: Response, db: Sessio
         raise HTTPException(status_code=403, detail="Your account is not active.")
     if not customer.email_verified:
         raise HTTPException(status_code=403, detail="Confirm your email address before signing in.")
-    token, _ = create_access_token(str(customer.id))
+    token, _ = create_access_token(str(customer.id), auth_method="password")
     response.set_cookie(ACCESS_COOKIE, token, max_age=settings.jwt_expire_minutes * 60, httponly=True, secure=settings.auth_cookie_secure, samesite="lax", path="/")
+    customer.can_change_email = True
     return customer
 
 
@@ -338,7 +341,7 @@ if (window.opener) {{
         customer = db.query(User).filter(User.email == email, User.role == UserRole.CUSTOMER).first()
         if customer is None or not customer.is_active or customer.status != AccountStatus.ACTIVE:
             return popup_result("unavailable")
-    token, _ = create_access_token(str(customer.id))
+    token, _ = create_access_token(str(customer.id), auth_method="google")
     return popup_result("success", token)
 
 

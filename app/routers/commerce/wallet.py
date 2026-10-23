@@ -20,10 +20,10 @@ from app.models.user import User, UserRole
 from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction, WalletTransfer
 from app.models.realtime import RealtimeEvent
 from app.services.notifications import create_notification
-from app.routers.admin_auth import current_admin
-from app.routers.customer_auth import current_customer
-from app.routers.chef_auth import current_chef
-from app.routers.manager_auth import current_manager
+from app.routers.auth.admin_auth import current_admin
+from app.routers.auth.customer_auth import current_customer
+from app.routers.auth.chef_auth import current_chef
+from app.routers.auth.manager_auth import current_manager
 
 customer_router = APIRouter(prefix="/api/customer/wallet", tags=["customer wallet"])
 admin_router = APIRouter(prefix="/api/admin/wallet", tags=["wallet administration"])

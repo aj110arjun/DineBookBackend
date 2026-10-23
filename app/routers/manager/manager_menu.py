@@ -12,7 +12,7 @@ from app.models.menu import Category, Food, FoodImage, FoodVariant
 from app.core.cloudinary import delete_file, upload_file
 from app.models.restaurant import Restaurant
 from app.models.user import User
-from app.routers.manager_auth import current_manager
+from app.routers.auth.manager_auth import current_manager
 
 router = APIRouter(prefix="/api/manager/menu", tags=["manager menu"])
 MAX_MENU_IMAGE_SIZE = 10 * 1024 * 1024

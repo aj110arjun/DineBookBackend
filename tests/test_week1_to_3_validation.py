@@ -29,19 +29,19 @@ from app.models.revenue import PlatformCommission
 from app.models.user import AccountStatus, User, UserRole
 from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction
 from app.models.realtime import WebhookReceipt
-from app.routers.admin_auth import current_admin
-from app.routers.chef_auth import current_chef, ChefChangePasswordRequest, change_chef_password
-from app.routers.customer_auth import (current_customer, CustomerPasswordChangeRequest,
+from app.routers.auth.admin_auth import current_admin
+from app.routers.auth.chef_auth import current_chef, ChefChangePasswordRequest, change_chef_password
+from app.routers.auth.customer_auth import (current_customer, CustomerPasswordChangeRequest,
     change_customer_password, router as customer_auth_router)
-from app.routers.manager_auth import current_manager
-from app.routers.dining import FloorUpdate, TableUpdate
-from app.routers.manager_menu import VariantPayload
-from app.routers.operating_hours import Period
-from app.routers.orders import OfferInput, manager_mark_order_paid, update_status, MANAGER_TRANSITIONS
-from app.routers.reservations import (ReservationCreate, within_operating_hours,
+from app.routers.auth.manager_auth import current_manager
+from app.routers.restaurants.dining import FloorUpdate, TableUpdate
+from app.routers.manager.manager_menu import VariantPayload
+from app.routers.restaurants.operating_hours import Period
+from app.routers.commerce.orders import OfferInput, manager_mark_order_paid, update_status, MANAGER_TRANSITIONS
+from app.routers.restaurants.reservations import (ReservationCreate, within_operating_hours,
     manager_update_reservation_status, ManagerReservationStatus)
-from app.routers.revenue import gross_revenue, sync_commission_records
-from app.routers.webhooks import router as webhook_router
+from app.routers.commerce.revenue import gross_revenue, sync_commission_records
+from app.routers.commerce.webhooks import router as webhook_router
 from app.services.notifications import _safe_action_url
 
 
@@ -94,12 +94,27 @@ class FieldValidationTests(unittest.TestCase):
 
     def test_offers_reject_blank_titles_mixed_scope_and_invalid_dates(self):
         start = datetime.now(timezone.utc)
-        invalid = ({"title": "   "}, {"starts_at": start, "ends_at": start},
+        invalid = ({"title": "   "}, {"starts_at": start, "ends_at": start - timedelta(days=1)},
                    {"applicability": "ITEMS", "eligible_food_ids": [uuid.uuid4()], "eligible_category_ids": [uuid.uuid4()]},
                    {"discount_percent": 101}, {"starts_at": datetime.now()})
         for extra in invalid:
             with self.subTest(extra=extra), self.assertRaises(ValidationError):
                 OfferInput(**{"code": "SAVE", "discount_percent": 10, **extra})
+
+    def test_offer_dates_are_full_day_and_reject_past_or_reversed_dates(self):
+        now = datetime.now(timezone.utc)
+        tomorrow = now + timedelta(days=1)
+        offer = OfferInput(code="DATES", discount_percent=10, starts_at=now, ends_at=tomorrow, timezone_name="Asia/Kolkata")
+        self.assertEqual(offer.starts_at.astimezone(timezone.utc).hour, 18)
+        self.assertEqual(offer.starts_at.astimezone(timezone.utc).minute, 30)
+        self.assertEqual(offer.ends_at.astimezone(timezone.utc).hour, 18)
+        self.assertEqual(offer.ends_at.astimezone(timezone.utc).minute, 29)
+        for extra in (
+            {"starts_at": now - timedelta(days=2), "timezone_name": "Asia/Kolkata"},
+            {"starts_at": tomorrow, "ends_at": now, "timezone_name": "Asia/Kolkata"},
+        ):
+            with self.subTest(extra=extra), self.assertRaises(ValidationError):
+                OfferInput(code="DATES", discount_percent=10, **extra)
 
     def test_schedule_times_require_local_minute_precision(self):
         for opens in ("09:00:01", "09:00+05:30"):
@@ -119,7 +134,7 @@ class FieldValidationTests(unittest.TestCase):
         ReservationCreate(**data)
 
     def test_booking_slots_follow_the_actual_opening_time(self):
-        with patch("app.routers.reservations.effective_periods", return_value=([{"opens": "09:15", "closes": "18:00"}], None)):
+        with patch("app.routers.restaurants.reservations.effective_periods", return_value=([{"opens": "09:15", "closes": "18:00"}], None)):
             self.assertTrue(within_operating_hours(None, uuid.uuid4(), date(2030, 1, 1), time(9, 45), time(11, 15)))
             self.assertFalse(within_operating_hours(None, uuid.uuid4(), date(2030, 1, 1), time(10), time(11, 30)))
 

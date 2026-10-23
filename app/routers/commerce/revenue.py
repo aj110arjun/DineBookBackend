@@ -15,9 +15,9 @@ from app.models.restaurant import Restaurant
 from app.models.revenue import PlatformCommission, PlatformCommissionPayout, PlatformRevenueSettings
 from app.models.user import User, UserRole
 from app.models.wallet import WalletAccount, WalletTransaction, WalletTransfer
-from app.routers.admin_auth import current_admin
-from app.routers.chef_auth import current_chef
-from app.routers.manager_auth import current_manager
+from app.routers.auth.admin_auth import current_admin
+from app.routers.auth.chef_auth import current_chef
+from app.routers.auth.manager_auth import current_manager
 
 admin_router = APIRouter(prefix="/api/admin/revenue", tags=["revenue wallets"])
 manager_router = APIRouter(prefix="/api/manager/revenue", tags=["revenue wallets"])

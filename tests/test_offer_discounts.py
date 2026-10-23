@@ -17,9 +17,9 @@ from app.models.orders import FoodOrderOffer, OfferRedemption
 from app.models.reservation import Reservation
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.user import User, UserRole
-from app.routers.orders import calculate_offer_discount, offer_data
+from app.routers.commerce.orders import calculate_offer_discount, offer_data
 from app.core.config import settings
-from app.routers.orders import (CheckoutInput, CustomerOrderCancellation, OrderLineInput,
+from app.routers.commerce.orders import (CheckoutInput, CustomerOrderCancellation, OrderLineInput,
     cancel_customer_order, create_reserved_order, validate_customer_offer, preview_customer_offer,
     OfferValidationInput, OfferPreviewInput, customer_router)
 

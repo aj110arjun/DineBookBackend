@@ -14,13 +14,13 @@ def now_utc() -> datetime:
 
 class Review(Base):
     __tablename__ = "reviews"
-    __table_args__ = (UniqueConstraint("order_id", name="uq_reviews_order_id"), UniqueConstraint("customer_id", "restaurant_id", name="uq_reviews_customer_restaurant"), CheckConstraint("rating >= 1 AND rating <= 5", name="ck_reviews_rating_range"), Index("ix_reviews_restaurant_status_created", "restaurant_id", "status", "created_at"))
+    __table_args__ = (Index("uq_reviews_customer_restaurant_active", "customer_id", "restaurant_id", unique=True, postgresql_where=text("status != 'REMOVED'"), sqlite_where=text("status != 'REMOVED'")), CheckConstraint("rating >= 1 AND rating <= 5", name="ck_reviews_rating_range"), Index("ix_reviews_restaurant_status_created", "restaurant_id", "status", "created_at"))
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     customer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
     restaurant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("restaurants.id", ondelete="RESTRICT"), nullable=False, index=True)
     food_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("food.id", ondelete="SET NULL"), nullable=True)
-    order_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("food_orders.id", ondelete="RESTRICT"), nullable=False)
+    order_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("food_orders.id", ondelete="RESTRICT"), nullable=True)
     rating: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="PUBLISHED")
@@ -30,11 +30,17 @@ class Review(Base):
 
 class ReviewFlag(Base):
     __tablename__ = "review_flags"
-    __table_args__ = (Index("uq_review_flags_active_customer", "review_id", "customer_id", unique=True, postgresql_where=text("status = 'PENDING'")), Index("ix_review_flags_status_created", "status", "created_at"))
+    __table_args__ = (
+        CheckConstraint("(customer_id IS NOT NULL AND manager_id IS NULL) OR (customer_id IS NULL AND manager_id IS NOT NULL)", name="ck_review_flags_single_reporter"),
+        Index("uq_review_flags_active_customer", "review_id", "customer_id", unique=True, postgresql_where=text("status = 'PENDING'"), sqlite_where=text("status = 'PENDING'")),
+        Index("uq_review_flags_active_manager", "review_id", "manager_id", unique=True, postgresql_where=text("status = 'PENDING'"), sqlite_where=text("status = 'PENDING'")),
+        Index("ix_review_flags_status_created", "status", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     review_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("reviews.id", ondelete="RESTRICT"), nullable=False, index=True)
-    customer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True)
+    manager_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True)
     reason: Mapped[str] = mapped_column(String(40), nullable=False)
     explanation: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")

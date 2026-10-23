@@ -28,10 +28,10 @@ from app.models.realtime import RealtimeEvent
 from app.services.notifications import create_notification, notify_reservation_status
 from app.services.reservation_email import send_reservation_confirmation, send_reservation_confirmation_in_background
 from app.services.restaurant_wallet import record_restaurant_payment, reverse_restaurant_payment
-from app.routers.customer_auth import current_customer
-from app.routers.chef_auth import current_chef
-from app.routers.manager_auth import current_manager
-from app.routers.operating_hours import effective_periods
+from app.routers.auth.customer_auth import current_customer
+from app.routers.auth.chef_auth import current_chef
+from app.routers.auth.manager_auth import current_manager
+from app.routers.restaurants.operating_hours import effective_periods
 
 customer_router = APIRouter(prefix="/api/customer/reservations", tags=["reservations"])
 manager_router = APIRouter(prefix="/api/manager/reservations", tags=["manager reservations"])
@@ -748,7 +748,7 @@ def manager_calendar_activities(
     manager: User = Depends(current_manager),
     db: Session = Depends(get_db),
 ) -> dict:
-    from app.routers.orders import serialize as serialize_order
+    from app.routers.commerce.orders import serialize as serialize_order
 
     restaurant = restaurant_for_staff(manager, db)
     search_value = search.strip()

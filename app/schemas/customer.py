@@ -44,3 +44,4 @@ class CustomerResponse(BaseModel):
     role: UserRole
     status: AccountStatus
     is_active: bool
+    can_change_email: bool = False

@@ -10,6 +10,7 @@ from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.restaurant_document import RestaurantDocument, RestaurantDocumentType
 from app.models.restaurant_hours import RestaurantHours
 from app.models.menu import Category, Food
+from app.models.reviews import Review
 
 
 router = APIRouter(prefix="/api/customer/restaurants", tags=["customer restaurants"])
@@ -174,8 +175,20 @@ def list_customer_restaurants(
     if sort == "distance":
         selected_columns.append(distance_expression.label("distance_km"))
     restaurant_rows = base_query.with_entities(*selected_columns).all()
+    restaurant_ids = [row.id for row in restaurant_rows]
+    review_averages = {}
+    if restaurant_ids:
+        review_averages = {
+            restaurant_id: (round(float(average), 1), count)
+            for restaurant_id, average, count in db.query(
+                Review.restaurant_id, func.avg(Review.rating), func.count(Review.id)
+            ).filter(
+                Review.restaurant_id.in_(restaurant_ids), Review.status == "PUBLISHED"
+            ).group_by(Review.restaurant_id).all()
+        }
     items = []
     for row in restaurant_rows:
+        rating, review_count = review_averages.get(row.id, (None, 0))
         item = {
             "id": str(row.id),
             "name": row.name,
@@ -188,6 +201,8 @@ def list_customer_restaurants(
             "status": row.status.value,
             "image": row.image,
             "created_at": row.created_at,
+            "rating": rating,
+            "review_count": review_count,
         }
         if sort == "distance":
             item["distance_km"] = round(float(row.distance_km), 2) if row.distance_km is not None else None
