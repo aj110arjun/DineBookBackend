@@ -32,6 +32,9 @@ class ReviewPayload(BaseModel):
     rating: int = Field(ge=1, le=5)
     content: str = Field(min_length=3, max_length=5000)
 
+class ReplyPayload(BaseModel):
+    content: str = Field(min_length=3, max_length=2000)
+
 class FlagPayload(BaseModel):
     reason: str = Field(pattern="^(SPAM|ABUSIVE|HARASSMENT|MISLEADING|OTHER)$")
     explanation: str | None = Field(default=None, max_length=1000)
@@ -53,6 +56,9 @@ def review_data(db: Session, review: Review, private: bool = False) -> dict:
         "order_id": str(review.order_id) if review.order_id else None, "rating": review.rating, "content": review.content,
         "customer_name": customer.name if customer else "Customer",
         "created_at": review.created_at.isoformat(), "updated_at": review.updated_at.isoformat()}
+    reply = db.query(ReviewReply).filter(ReviewReply.review_id == review.id).first()
+    data["reply"] = {"id": str(reply.id), "content": reply.content,
+        "created_at": reply.created_at.isoformat(), "updated_at": reply.updated_at.isoformat()} if reply else None
     if private:
         data.update(status=review.status, is_mine=True)
         manager_flag = db.query(ReviewFlag).filter(ReviewFlag.review_id == review.id, ReviewFlag.manager_id.is_not(None)).order_by(ReviewFlag.created_at.desc()).first()
@@ -226,6 +232,28 @@ def manager_restaurant(manager: User, db: Session) -> Restaurant:
     if restaurant is None: raise HTTPException(404, "No restaurant is linked to this manager account.")
     return restaurant
 
+@manager_router.put("/{review_id}/reply")
+def reply_to_review(review_id: uuid.UUID, payload: ReplyPayload, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
+    restaurant = manager_restaurant(manager, db)
+    review = db.query(Review).filter(Review.id == review_id, Review.restaurant_id == restaurant.id).with_for_update().first()
+    if review is None:
+        raise HTTPException(404, "Review not found for your restaurant.")
+    if review.status != "PUBLISHED":
+        raise HTTPException(409, "You can only reply to published reviews.")
+    content = clean(payload.content)
+    if len(content) < 3:
+        raise HTTPException(422, "Reply must contain at least 3 non-space characters.")
+    reply = db.query(ReviewReply).filter(ReviewReply.review_id == review.id).first()
+    if reply is None:
+        reply = ReviewReply(review_id=review.id, restaurant_id=restaurant.id, manager_id=manager.id, content=content)
+        db.add(reply)
+    else:
+        reply.content = content
+        reply.manager_id = manager.id
+    db.commit()
+    db.refresh(reply)
+    return review_data(db, review, True)["reply"]
+
 @manager_router.get("")
 def manager_reviews(manager: User = Depends(current_manager), db: Session = Depends(get_db), rating: int | None = Query(None, ge=1, le=5), food_id: uuid.UUID | None = None, date_from: datetime | None = None, date_to: datetime | None = None, status: str | None = None, replied: bool | None = None, search: str | None = None, offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=100)) -> dict:
     restaurant = manager_restaurant(manager, db)
@@ -239,7 +267,54 @@ def manager_reviews(manager: User = Depends(current_manager), db: Session = Depe
         query = query.join(ReviewReply, ReviewReply.review_id == Review.id, isouter=True).filter(ReviewReply.id.is_not(None) if replied else ReviewReply.id.is_(None))
     if search: query = query.filter(Review.content.ilike(f"%{search[:100]}%"))
     total = query.count(); rows = query.order_by(Review.created_at.desc()).offset(offset).limit(limit).all()
-    avg = db.query(func.avg(Review.rating)).filter(Review.restaurant_id == restaurant.id, Review.status == "PUBLISHED").scalar()
+    # Restaurant-wide analytics, independent of list filters.
+    base = db.query(Review).filter(
+        Review.restaurant_id == restaurant.id,
+        Review.status != "REMOVED",
+    )
+
+    published = base.filter(Review.status == "PUBLISHED")
+
+    rating_counts = dict(
+        published.with_entities(
+            Review.rating,
+            func.count(Review.id),
+        ).group_by(Review.rating).all()
+    )
+
+    published_count = sum(rating_counts.values())
+
+    average = (
+        sum(rating * count for rating, count in rating_counts.items())
+        / published_count
+        if published_count else None
+    )
+
+    replied_count = published.filter(
+        Review.id.in_(db.query(ReviewReply.review_id))
+    ).count()
+
+    pending_flags = base.filter(
+        Review.id.in_(
+            db.query(ReviewFlag.review_id).filter(
+                ReviewFlag.manager_id == manager.id,
+                ReviewFlag.status == "PENDING",
+            )
+        )
+    ).count()
+
+    analytics = {
+        "total_reviews": base.count(),
+        "published_reviews": published_count,
+        "average_rating": round(average, 2) if average is not None else None,
+        "replied_reviews": replied_count,
+        "unanswered_reviews": published_count - replied_count,
+        "pending_flags": pending_flags,
+        "rating_distribution": {
+            str(rating): rating_counts.get(rating, 0)
+            for rating in range(1, 6)
+        },
+    }
     items = []
     for review in rows:
         item = review_data(db, review, True)
@@ -247,7 +322,13 @@ def manager_reviews(manager: User = Depends(current_manager), db: Session = Depe
             ReviewFlag.review_id == review.id, ReviewFlag.manager_id == manager.id, ReviewFlag.status == "PENDING",
         ).first())
         items.append(item)
-    return {"items": items, "total": total, "average_rating": round(float(avg), 2) if avg else None}
+        
+    return {
+        "items": items,
+        "total": total,
+        "average_rating": analytics["average_rating"],
+        "analytics": analytics,
+    }
 
 @admin_router.get("")
 def moderation_queue(admin: User = Depends(current_admin), db: Session = Depends(get_db), status: str = "PENDING", reason: str | None = None, flagged_by: str | None = None, rating: int | None = Query(None, ge=1, le=5), date_from: datetime | None = None, date_to: datetime | None = None, min_reports: int = Query(1, ge=1), search: str | None = None, offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100)) -> dict:

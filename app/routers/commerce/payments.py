@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import String, cast, literal, or_, select
+from sqlalchemy import String, cast, func, literal, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -14,6 +14,7 @@ from app.routers.auth.admin_auth import current_admin
 from app.routers.auth.manager_auth import current_manager
 
 manager_router = APIRouter(prefix="/api/manager/payments", tags=["manager payments"])
+transactions_router = APIRouter(prefix="/api/admin/transactions", tags=["admin transactions"])
 admin_router = APIRouter(prefix="/api/admin/restaurants/{restaurant_id}/payments", tags=["admin restaurant payments"])
 
 
@@ -48,7 +49,7 @@ def order_payment_view(item: FoodOrder) -> dict:
     }
 
 
-def list_payments(db: Session, restaurant_id: uuid.UUID, *, q: str | None, payment_status: str | None,
+def list_payments(db: Session, restaurant_id: uuid.UUID | None, *, q: str | None, payment_status: str | None,
                   transaction_type: str | None, payment_method: str | None, refund_status: str | None,
                   date_from: date | None, date_to: date | None, sort: str, page: int, page_size: int) -> dict:
     if date_from and date_to and date_from > date_to:
@@ -60,7 +61,10 @@ def list_payments(db: Session, restaurant_id: uuid.UUID, *, q: str | None, payme
         Reservation.razorpay_payment_id.label("razorpay_payment_id"), Reservation.created_at.label("created_at"),
         Reservation.updated_at.label("updated_at"), cast(Reservation.id, String).label("reservation_id"),
         literal(None, type_=String).label("order_id"),
-    ).where(Reservation.restaurant_id == restaurant_id)
+        cast(Restaurant.id, String).label("restaurant_id"), Restaurant.name.label("restaurant_name"),
+    ).join(Restaurant, Restaurant.id == Reservation.restaurant_id)
+    if restaurant_id is not None:
+        reservation_rows = reservation_rows.where(Reservation.restaurant_id == restaurant_id)
     order_rows = select(
         cast(FoodOrder.id, String).label("id"), literal("ORDER_PAYMENT").label("type"),
         FoodOrder.total.label("amount"), FoodOrder.payment_method.label("payment_method"),
@@ -68,13 +72,16 @@ def list_payments(db: Session, restaurant_id: uuid.UUID, *, q: str | None, payme
         literal(None, type_=String).label("razorpay_payment_id"), FoodOrder.created_at.label("created_at"),
         FoodOrder.updated_at.label("updated_at"), cast(FoodOrder.reservation_id, String).label("reservation_id"),
         cast(FoodOrder.id, String).label("order_id"),
-    ).where(FoodOrder.restaurant_id == restaurant_id)
+        cast(Restaurant.id, String).label("restaurant_id"), Restaurant.name.label("restaurant_name"),
+    ).join(Restaurant, Restaurant.id == FoodOrder.restaurant_id)
+    if restaurant_id is not None:
+        order_rows = order_rows.where(FoodOrder.restaurant_id == restaurant_id)
     records = reservation_rows.union_all(order_rows).subquery()
     query = db.query(records)
     if q and q.strip():
         term = f"%{q.strip()}%"
         displayed_id_suffix = q.strip().split("-")[-1] if q.strip().upper().startswith(("TXN-", "ORD-", "RES-")) else ""
-        query = query.filter(or_(records.c.id.ilike(term), records.c.order_id.ilike(term),
+        query = query.filter(or_(records.c.restaurant_name.ilike(term), records.c.id.ilike(term), records.c.order_id.ilike(term),
             records.c.reservation_id.ilike(term), records.c.razorpay_order_id.ilike(term),
             records.c.razorpay_payment_id.ilike(term),
             records.c.id.ilike(f"%{displayed_id_suffix}%") if displayed_id_suffix else literal(False)))
@@ -94,7 +101,10 @@ def list_payments(db: Session, restaurant_id: uuid.UUID, *, q: str | None, payme
         query = query.filter(records.c.created_at < datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=timezone.utc))
     total = query.count()
     ordering = records.c.amount.asc() if sort == "amount-low" else records.c.amount.desc() if sort == "amount-high" else records.c.created_at.asc() if sort == "oldest" else records.c.created_at.desc()
-    items = query.order_by(ordering, records.c.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    if sort in ("restaurant-asc", "restaurant-desc"):
+        name = func.lower(records.c.restaurant_name)
+        ordering = name.asc() if sort == "restaurant-asc" else name.desc()
+    items = query.order_by(ordering, records.c.created_at.desc(), records.c.type.asc(), records.c.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
     return {"transactions": [{**dict(item._mapping), "amount": float(item.amount), "currency": "INR",
             "refund_status": "REFUNDED" if item.status == "REFUNDED" else "NONE",
             "transaction_id": item.id} for item in items], "total": total,
@@ -152,7 +162,8 @@ def manager_payment_details(transaction_id: uuid.UUID, manager: User = Depends(c
         "customer_name": customer.name if customer else (order.guest_name or "Customer"),
         "customer_email": customer.email if customer else None,
         "items": order.items, "subtotal": float(order.subtotal),
-        "discount_amount": float(order.discount_amount)}
+        "discount_amount": float(order.discount_amount),
+        "tax_amount": float(order.tax_amount or 0), "tax_percent": float(order.tax_percent or 0)}
 
 
 @admin_router.get("")
@@ -202,4 +213,30 @@ def admin_restaurant_payment_details(restaurant_id: uuid.UUID, transaction_id: u
         "customer_name": customer.name if customer else (order.guest_name or "Customer"),
         "customer_email": customer.email if customer else None,
         "items": order.items, "subtotal": float(order.subtotal),
-        "discount_amount": float(order.discount_amount)}
+        "discount_amount": float(order.discount_amount),
+        "tax_amount": float(order.tax_amount or 0), "tax_percent": float(order.tax_percent or 0)}
+
+
+@transactions_router.get("")
+def admin_transactions(restaurant_id: uuid.UUID | None = None,
+        q: str | None = Query(default=None, max_length=120),
+        payment_status: str | None = Query(default=None, pattern="^(PENDING|PAID|FAILED|REFUNDED)$"),
+        transaction_type: str | None = Query(default=None, pattern="^(RESERVATION_FEE|ORDER_PAYMENT)$"),
+        payment_method: str | None = Query(default=None, max_length=30),
+        refund_status: str | None = Query(default=None, pattern="^(NONE|REFUNDED)$"),
+        date_from: date | None = None, date_to: date | None = None,
+        sort: str = Query(default="newest", pattern="^(newest|oldest|amount-low|amount-high|restaurant-asc|restaurant-desc)$"),
+        page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100),
+        admin: User = Depends(current_admin), db: Session = Depends(get_db)) -> dict:
+    if restaurant_id is not None and db.query(Restaurant.id).filter(Restaurant.id == restaurant_id).first() is None:
+        raise HTTPException(status_code=404, detail="Restaurant not found.")
+    return list_payments(db, restaurant_id, q=q, payment_status=payment_status,
+        transaction_type=transaction_type, payment_method=payment_method, refund_status=refund_status,
+        date_from=date_from, date_to=date_to, sort=sort, page=page, page_size=page_size)
+
+
+
+@transactions_router.get("/restaurants")
+def transaction_restaurants(admin: User = Depends(current_admin), db: Session = Depends(get_db)) -> list[dict]:
+    return [{"id": str(item.id), "name": item.name} for item in
+            db.query(Restaurant.id, Restaurant.name).order_by(func.lower(Restaurant.name), Restaurant.id).all()]

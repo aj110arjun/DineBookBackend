@@ -104,7 +104,12 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
                 or not isinstance(payment_id, str) or not payment_id or len(payment_id) > 80):
             db.rollback()
             raise HTTPException(status_code=400, detail="Failed payment data is invalid.")
-        failed_reservation = db.query(Reservation).filter(Reservation.razorpay_order_id == order_id).with_for_update().first()
+        failed_reservation = (
+            db.query(Reservation)
+            .filter(Reservation.razorpay_order_id == order_id)
+            .with_for_update()
+            .first()
+        )
         if failed_reservation and failed_reservation.payment_status != "PAID":
             cancel_reservation_record(db, failed_reservation, None, "Reservation payment failed.")
             failed_reservation.payment_status = "FAILED"
@@ -121,11 +126,20 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
                 resource_id=str(failed_reservation.id), data={"status": "FAILED", "resource_type": "reservation"}))
             receipt.outcome = "PROCESSED"
         else:
-            failed_topup = db.query(WalletTopUp).filter(WalletTopUp.razorpay_order_id == order_id).with_for_update().first()
+            failed_topup = (
+                db.query(WalletTopUp)
+                .filter(WalletTopUp.razorpay_order_id == order_id)
+                .with_for_update()
+                .first()
+            )
             if failed_topup and failed_topup.status != "PAID":
                 failed_topup.status = "FAILED"
                 failed_topup.razorpay_payment_id = payment_id
-                customer = db.query(User).filter_by(id=failed_topup.user_id).first()
+                customer = (
+                    db.query(User)
+                    .filter_by(id=failed_topup.user_id)
+                    .first()
+                )
                 if customer:
                     wallet_url = ("/customer/profile/wallet" if customer.role.value == "CUSTOMER" else
                         "/manager/revenue" if customer.role.value == "MANAGER" else
@@ -170,9 +184,19 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
         db.rollback()
         raise HTTPException(status_code=400, detail="Captured payment data is invalid.")
 
-    topup = db.query(WalletTopUp).filter(WalletTopUp.razorpay_order_id == order_id).with_for_update().first()
+    topup = (
+        db.query(WalletTopUp)
+        .filter(WalletTopUp.razorpay_order_id == order_id)
+        .with_for_update()
+        .first()
+    )
     if topup is None:
-        reservation = db.query(Reservation).filter(Reservation.razorpay_order_id == order_id).with_for_update().first()
+        reservation = (
+            db.query(Reservation)
+            .filter(Reservation.razorpay_order_id == order_id)
+            .with_for_update()
+            .first()
+        )
         if reservation is None:
             # A valid event for an unrelated Razorpay order is acknowledged but not applied.
             receipt.outcome = "IGNORED"
@@ -249,8 +273,10 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
         topup.status = "PAID"
         topup.razorpay_payment_id = payment_id
         topup.paid_at = datetime.now(timezone.utc)
-        db.add(WalletTransaction(user_id=topup.user_id, amount=topup.amount, transaction_type="CREDIT",
-            description="Wallet top-up", reference=payment_id))
+        wallet_transaction = WalletTransaction(user_id=topup.user_id, amount=topup.amount, transaction_type="CREDIT",
+            description="Wallet top-up", reference=payment_id)
+        db.add(wallet_transaction)
+        notify_wallet_transaction(db, wallet_transaction)
         db.add(RealtimeEvent(user_id=topup.user_id, event_type="payment.status_changed",
             resource_id=str(topup.id), data={"status": "PAID", "resource_type": "wallet_topup"}))
         customer = db.query(User).filter_by(id=topup.user_id).first()

@@ -10,9 +10,9 @@ from sqlalchemy.orm import Session
 from app.db.database import Base
 from app.models.restaurant import Restaurant
 from app.models.orders import FoodOrder
-from app.models.reviews import Review, ReviewFlag, ReviewModerationEvent
+from app.models.reviews import Review, ReviewFlag, ReviewModerationEvent, ReviewReply
 from app.models.user import User, UserRole
-from app.routers.restaurants.reviews import ActionPayload, ReviewPayload, FlagPayload, create_review, update_review, moderate, flag_review, manager_flag_review, manager_router, delete_own_review, public_reviews
+from app.routers.restaurants.reviews import ReplyPayload, reply_to_review, ActionPayload, ReviewPayload, FlagPayload, create_review, update_review, moderate, flag_review, manager_flag_review, manager_router, delete_own_review, public_reviews
 
 
 class ReviewModerationTests(unittest.TestCase):
@@ -98,7 +98,34 @@ class ReviewModerationTests(unittest.TestCase):
         self.assertEqual(result["status"], "PENDING")
         self.assertEqual(self.review.status, "PUBLISHED")
         self.assertFalse(any(route.path.endswith("/{review_id}") and "DELETE" in route.methods for route in manager_router.routes))
-        self.assertFalse(any(route.path.endswith("/{review_id}/reply") for route in manager_router.routes))
+        self.assertTrue(any(route.path.endswith("/{review_id}/reply") and "PUT" in route.methods for route in manager_router.routes))
+
+    def test_manager_reply_is_public_and_can_be_updated(self):
+        reply = reply_to_review(self.review.id, ReplyPayload(content="Thank you for your feedback"), self.manager, self.db)
+        result = public_reviews(self.restaurant.id, self.db, limit=20, offset=0)
+        self.assertEqual(result["items"][0]["reply"]["content"], reply["content"])
+        updated = reply_to_review(self.review.id, ReplyPayload(content="We will improve our service"), self.manager, self.db)
+        self.assertEqual(updated["id"], reply["id"])
+        self.assertEqual(self.db.query(ReviewReply).count(), 1)
+        self.assertEqual(updated["content"], "We will improve our service")
+
+    def test_manager_cannot_reply_to_other_restaurants_review(self):
+        other = User(name="Other manager", email="other-manager@example.com", password_hash="x", role=UserRole.MANAGER)
+        self.db.add(other); self.db.flush()
+        self.db.add(Restaurant(manager_id=other.id, name="Other", address="2 Main", city="Pune")); self.db.commit()
+        with self.assertRaises(HTTPException) as caught:
+            reply_to_review(self.review.id, ReplyPayload(content="A response"), other, self.db)
+        self.assertEqual(caught.exception.status_code, 404)
+        self.assertEqual(self.db.query(ReviewReply).count(), 0)
+
+    def test_reply_rejects_whitespace_and_hidden_reviews(self):
+        with self.assertRaises(HTTPException) as caught:
+            reply_to_review(self.review.id, ReplyPayload(content="   "), self.manager, self.db)
+        self.assertEqual(caught.exception.status_code, 422)
+        self.review.status = "HIDDEN"; self.db.commit()
+        with self.assertRaises(HTTPException) as caught:
+            reply_to_review(self.review.id, ReplyPayload(content="A response"), self.manager, self.db)
+        self.assertEqual(caught.exception.status_code, 409)
 
     def test_manager_flag_blocks_new_review_for_24_hours(self):
         manager_flag_review(self.review.id, FlagPayload(reason="ABUSIVE"), self.manager, self.db)

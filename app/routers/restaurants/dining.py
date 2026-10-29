@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -7,6 +7,7 @@ from decimal import Decimal
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.services.table_availability import table_statuses, RESERVATION_DURATION
 from app.db.database import get_db
 from app.models.dining import DiningTable, DiningTableType, RestaurantFloor
 from app.models.restaurant import Restaurant
@@ -287,11 +288,24 @@ def chef_floors(chef: User = Depends(current_chef), db: Session = Depends(get_db
 
 
 @customer_router.get("/{restaurant_id}/floors")
-def customer_floors(restaurant_id: uuid.UUID, db: Session = Depends(get_db)) -> list[dict]:
+def customer_floors(restaurant_id: uuid.UUID, reservation_date: date | None = None,
+                    start_time: time | None = None, db: Session = Depends(get_db)) -> list[dict]:
     restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
     if restaurant is None:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
-    return list_floor_data(restaurant.id, db)
+    if (reservation_date is None) != (start_time is None):
+        raise HTTPException(status_code=422, detail="Provide both reservation_date and start_time.")
+    floors = list_floor_data(restaurant.id, db)
+    if reservation_date is not None:
+        if start_time.tzinfo is not None or start_time.second or start_time.microsecond:
+            raise HTTPException(status_code=422, detail="Choose a local time with minute precision.")
+        tables = db.query(DiningTable).filter(DiningTable.restaurant_id == restaurant.id).all()
+        end = (datetime.combine(reservation_date, start_time) + RESERVATION_DURATION).time()
+        statuses = table_statuses(db, tables, reservation_date, start_time, end)
+        for floor in floors:
+            for table in floor["tables"]:
+                table["status"] = statuses[uuid.UUID(table["id"])]
+    return floors
 
 
 @admin_router.get("/{restaurant_id}/floors")

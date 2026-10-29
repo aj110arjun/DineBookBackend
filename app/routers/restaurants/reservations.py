@@ -32,6 +32,9 @@ from app.routers.auth.customer_auth import current_customer
 from app.routers.auth.chef_auth import current_chef
 from app.routers.auth.manager_auth import current_manager
 from app.routers.restaurants.operating_hours import effective_periods
+from app.services.notifications import notify_wallet_transaction
+from app.services.table_availability import table_statuses, RESERVATION_DURATION
+
 
 customer_router = APIRouter(prefix="/api/customer/reservations", tags=["reservations"])
 manager_router = APIRouter(prefix="/api/manager/reservations", tags=["manager reservations"])
@@ -199,13 +202,8 @@ def reservation_data(item: Reservation, db: Session, include_orders: bool = True
 
 
 def overlapping(db: Session, table_id: uuid.UUID, day: date, start: time, end: time) -> bool:
-    return db.query(Reservation.id).join(ReservationTable).filter(
-        ReservationTable.table_id == table_id,
-        Reservation.reservation_date == day,
-        Reservation.status.in_(BLOCKING),
-        Reservation.start_time < end,
-        Reservation.end_time > start,
-    ).first() is not None
+    table = db.get(DiningTable, table_id)
+    return table is not None and table_statuses(db, [table], day, start, end)[table_id] != "available"
 
 
 def within_operating_hours(db: Session, restaurant_id: uuid.UUID, day: date, start: time, end: time) -> bool:
@@ -227,29 +225,28 @@ def within_operating_hours(db: Session, restaurant_id: uuid.UUID, day: date, sta
 
 
 def suitable_table_groups(db: Session, restaurant_id: uuid.UUID, day: date, start: time, guests: int, lock: bool = False) -> list[tuple[DiningTable, ...]]:
-    end = (datetime.combine(day, start) + timedelta(hours=1, minutes=30)).time()
+    end = (datetime.combine(day, start) + RESERVATION_DURATION).time()
     query = db.query(DiningTable).join(RestaurantFloor, DiningTable.floor_id == RestaurantFloor.id).filter(
-        DiningTable.restaurant_id == restaurant_id, DiningTable.status == "available",
+        DiningTable.restaurant_id == restaurant_id, DiningTable.status.in_(("available", "occupied", "reserved")),
         RestaurantFloor.is_active.is_(True),
     ).order_by(DiningTable.capacity, DiningTable.reservation_fee, DiningTable.table_number)
     if lock:
         query = query.with_for_update()
-    candidates = [table for table in query.all() if not overlapping(db, table.id, day, start, end)]
-    if guests <= 2:
-        groups = [(table,) for table in candidates if table.capacity >= guests]
-    elif guests <= 6:
-        long_tables = [table for table in candidates if getattr(table.table_type, "value", table.table_type) == "rectangle"]
-        groups = [(table,) for table in long_tables if table.capacity >= guests]
-        groups.extend(
-            pair for pair in combinations(candidates, 2)
-            if pair[0].floor_id == pair[1].floor_id
-            and any(getattr(table.table_type, "value", table.table_type) == "rectangle" for table in pair)
-            and sum(table.capacity for table in pair) >= guests
-        )
-    else:
-        long_tables = [table for table in candidates if getattr(table.table_type, "value", table.table_type) == "rectangle"]
-        groups = [pair for pair in combinations(long_tables, 2)
-            if pair[0].floor_id == pair[1].floor_id and sum(table.capacity for table in pair) >= guests]
+    tables = query.all()
+    statuses = table_statuses(db, tables, day, start, end)
+    candidates = [table for table in tables if statuses[table.id] == "available"]
+    groups = [
+        (table,)
+        for table in candidates
+        if table.capacity >= guests
+        ]
+
+    groups.extend(
+        pair
+        for pair in combinations(candidates, 2)
+        if pair[0].floor_id == pair[1].floor_id
+        and sum(table.capacity for table in pair) >= guests
+    )
     return sorted(groups, key=lambda group: (len(group), sum(table.reservation_fee for table in group), sum(table.capacity for table in group)))
 
 
@@ -277,7 +274,7 @@ def availability(restaurant_id: uuid.UUID, reservation_date: date, start_time: t
     restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id, Restaurant.status == RestaurantStatus.APPROVED).first()
     if restaurant is None:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
-    end = (datetime.combine(reservation_date, start_time) + timedelta(hours=1, minutes=30)).time()
+    end = (datetime.combine(reservation_date, start_time) + RESERVATION_DURATION).time()
     if reservation_date <= datetime.now(RESTAURANT_TIMEZONE).date():
         return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.isoformat(),
                 "start_time": start_time.strftime("%H:%M"), "end_time": end.strftime("%H:%M"),
@@ -314,7 +311,7 @@ def reservation_time_slots(restaurant_id: uuid.UUID, reservation_date: date,
             if closing <= opening:
                 closing += 24 * 60
             for start_minute in range(opening, closing, 30):
-                end_minute = start_minute + 90
+                end_minute = start_minute + int(RESERVATION_DURATION.total_seconds() // 60)
                 if end_minute > closing:
                     break
                 slot_day = reservation_date + timedelta(days=start_minute // (24 * 60))
@@ -336,7 +333,7 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
     restaurant = db.query(Restaurant).filter(Restaurant.id == payload.restaurant_id, Restaurant.status == RestaurantStatus.APPROVED).first()
     if restaurant is None:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
-    end = (datetime.combine(payload.reservation_date, payload.start_time) + timedelta(hours=1, minutes=30)).time()
+    end = (datetime.combine(payload.reservation_date, payload.start_time) + RESERVATION_DURATION).time()
     if not within_operating_hours(db, restaurant.id, payload.reservation_date, payload.start_time, end):
         raise HTTPException(status_code=409, detail="The restaurant is closed or this time is outside its operating hours.")
     if payload.fulfillment_type == "PREORDER" and not payload.preorder_items:
@@ -470,6 +467,8 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
             preorder_offer_code=preorder_offer.code if preorder_offer else None,
             fee_amount=fee_amount)
         db.add(item)
+        if wallet_account:
+            notify_wallet_transaction(db, WalletTransaction(user_id=customer.id, reservation_id=item.id, amount=-wallet_debit_amount))
         db.flush()
         checkout = None
         if payload.payment_method == "RAZORPAY":
@@ -658,9 +657,11 @@ def refund_wallet_reservation(db: Session, item: Reservation) -> Decimal:
         item.payment_status = "REFUNDED"
     if preorder_refundable:
         item.preorder_payment_status = "REFUNDED"
-    db.add(WalletTransaction(user_id=item.user_id, reservation_id=item.id, amount=refund_amount,
+    wallet_transaction = WalletTransaction(user_id=item.user_id, reservation_id=item.id, amount=refund_amount,
         transaction_type="REFUND", description="Wallet refund for cancelled reservation",
-        reference=f"reservation:{item.id}"))
+        reference=f"reservation:{item.id}")
+    db.add(wallet_transaction)
+    notify_wallet_transaction(db, wallet_transaction)
     reverse_restaurant_payment(db, item.restaurant_id, refund_amount,
         f"Customer wallet refund · RES-{item.id.hex[:8].upper()}", f"customer-refund:reservation:{item.id}")
     return refund_amount
