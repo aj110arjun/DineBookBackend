@@ -1,16 +1,19 @@
 import uuid
 from urllib.parse import urlsplit
 
+from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.models.notifications import Notification, NotificationPreference
 from app.models.realtime import RealtimeEvent
 from app.models.restaurant import Restaurant
 from app.models.user import User, UserRole
+from app.models.wallet import WalletTransaction
 
 ALLOWED_CATEGORIES = {"RESERVATION", "ORDER", "PAYMENT", "REVIEW", "STAFF", "APPROVAL", "SYSTEM"}
 MANDATORY_TYPES = {"payment.failed", "payment.success", "wallet.topup.success", "wallet.topup.failed",
-                   "restaurant.suspended", "system.incident", "reservation.reminder", "review.moderated"}
+                   "restaurant.suspended", "system.incident", "reservation.reminder", "review.moderated",
+                   "wallet.transaction", "wallet.credit.issued",}
 ALLOWED_ACTIONS = {
     "/customer/profile/orders", "/customer/profile/reservations", "/customer/profile/wallet",
     "/customer/profile/reviews", "/manager/orders", "/manager/reservations", "/manager/reviews",
@@ -101,3 +104,53 @@ def notify_reservation_status(db: Session, reservation) -> None:
             title=f"Reservation {status.lower().replace('_', ' ')}", message="A restaurant reservation was updated.",
             restaurant_id=reservation.restaurant_id, entity_type="reservation", entity_id=reservation.id,
             action_url="/manager/reservations", dedupe_key=f"reservation:{reservation.id}:{status}:manager")
+
+def notify_wallet_transaction(
+    db: Session,
+    transaction: WalletTransaction,
+) -> None:
+    recipient = db.query(User).filter(
+        User.id == transaction.user_id
+    ).first()
+
+    if recipient is None:
+        return
+
+    # Ensure the transaction has an ID before constructing the notification.
+    db.flush()
+
+    action_urls = {
+        UserRole.CUSTOMER: "/customer/profile/wallet",
+        UserRole.MANAGER: "/manager/revenue",
+        UserRole.CHEF: "/chef/revenue",
+        UserRole.ADMIN: "/admin/revenue",
+    }
+
+    amount = abs(Decimal(transaction.amount))
+    is_refund = transaction.transaction_type == "REFUND"
+    is_credit = transaction.transaction_type in {"CREDIT", "REFUND"}
+    movement = "credited to" if is_credit else "debited from"
+    title = "Wallet refund received" if is_refund else ("Wallet credited" if is_credit else "Wallet debited")
+    message = (
+        f"₹{amount:,.2f} was refunded to your wallet. {transaction.description}"
+        if is_refund else
+        f"₹{amount:,.2f} was {movement} your wallet. {transaction.description}"
+    )
+
+    create_notification(
+        db,
+        recipient,
+        notification_type="wallet.transaction",
+        category="PAYMENT",
+        title=title,
+        message=message,
+        entity_type="wallet_transaction",
+        entity_id=transaction.id,
+        action_url=action_urls.get(recipient.role),
+        dedupe_key=f"wallet-transaction:{transaction.id}",
+        metadata={
+            "transaction_id": str(transaction.id),
+            "amount": str(transaction.amount),
+            "transaction_type": transaction.transaction_type,
+        },
+    )

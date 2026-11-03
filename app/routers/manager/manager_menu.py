@@ -13,9 +13,10 @@ from app.core.cloudinary import delete_file, upload_file
 from app.models.restaurant import Restaurant
 from app.models.user import User
 from app.routers.auth.manager_auth import current_manager
+from app.core.config import settings
 
 router = APIRouter(prefix="/api/manager/menu", tags=["manager menu"])
-MAX_MENU_IMAGE_SIZE = 10 * 1024 * 1024
+MAX_MENU_IMAGE_SIZE = settings.max_image_upload_size_mb * 1024 * 1024  # Convert MB to bytes
 ALLOWED_MENU_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 

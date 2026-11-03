@@ -11,6 +11,7 @@ from app.models.restaurant_document import RestaurantDocument, RestaurantDocumen
 from app.models.restaurant_hours import RestaurantHours
 from app.models.menu import Category, Food
 from app.models.reviews import Review
+from app.services.menu_listing import menu_page
 
 
 router = APIRouter(prefix="/api/customer/restaurants", tags=["customer restaurants"])
@@ -26,8 +27,14 @@ class NearbyRestaurantSearch(BaseModel):
     page_size: int = Field(default=6, ge=1, le=100)
 
 
-@router.get("/{restaurant_id}/menu", response_model=list[dict])
-def get_customer_restaurant_menu(restaurant_id: uuid.UUID, db: Session = Depends(get_db)) -> list[dict]:
+@router.get("/{restaurant_id}/menu")
+def get_customer_restaurant_menu(restaurant_id: uuid.UUID, db: Session = Depends(get_db),
+    page: int | None = Query(None, ge=1), page_size: int = Query(8, ge=1, le=100),
+    search: str = "", category_id: uuid.UUID | None = None,
+    sort: str = Query("name", pattern="^(name|name-desc|price-low|price-high)$")):
+    if isinstance(page, int):
+        return menu_page(db, restaurant_id, page=page, page_size=page_size, search=search,
+                         category_id=category_id, sort=sort, public=True)
     restaurant = db.query(Restaurant).filter(
         Restaurant.id == restaurant_id,
         Restaurant.status == RestaurantStatus.APPROVED,

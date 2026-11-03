@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     smtp_password: str | None = None
     smtp_from_email: str | None = None
     smtp_use_tls: bool = True
+    max_image_upload_size_mb: int = 5
 
     # Keep the legacy development key for local session compatibility, but never
     # permit it in a production deployment (validated below).

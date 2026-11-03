@@ -1,12 +1,12 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
-from sqlalchemy import func, or_
+from sqlalchemy import String, cast, func, or_
 from sqlalchemy.exc import IntegrityError
 
 from app.db.database import get_db
@@ -133,7 +133,12 @@ class OfferPreviewInput(BaseModel):
     offer_code: str = Field(min_length=3, max_length=40)
 
 
-class SpotOrderInput(BaseModel):
+class SpotOrderPreviewInput(BaseModel):
+    items: list[OrderLineInput] = Field(min_length=1, max_length=50)
+    offer_code: str | None = Field(default=None, max_length=40)
+
+
+class SpotOrderInput(SpotOrderPreviewInput):
     idempotency_key: uuid.UUID
     table_id: uuid.UUID
     guest_name: str = Field(min_length=1, max_length=120)
@@ -408,8 +413,10 @@ def create_reserved_order(reservation_id: uuid.UUID, payload: CheckoutInput, cus
                 discount_amount=discount, status="APPLIED"))
         record_order_event(db, order, actor=actor or customer)
         if payload.payment_method == "WALLET":
-            db.add(WalletTransaction(user_id=customer.id, amount=-total, transaction_type="DEBIT",
-                description=f"Food order at {restaurant.name}", reference=f"food-order:{order.id}"))
+            wallet_transaction = WalletTransaction(user_id=customer.id, amount=-total, transaction_type="DEBIT",
+                description=f"Food order at {restaurant.name}", reference=f"food-order:{order.id}")
+            db.add(wallet_transaction)
+            notify_wallet_transaction(db, wallet_transaction)
             record_restaurant_payment(db, restaurant.id, total,
                 f"Food order ORD-{order.id.hex[:8].upper()} · DineBook wallet", f"customer-payment:order:{order.id}")
         db.commit()
@@ -621,10 +628,65 @@ def chef_reservation_orders(reservation_id: uuid.UUID, chef: User = Depends(curr
     rows = db.query(FoodOrder).filter(FoodOrder.reservation_id == reservation.id).order_by(FoodOrder.created_at.asc()).all()
     return [serialize(row, db) for row in rows]
     
+class OrderListParams(BaseModel):
+    page: int | None = Field(default=None, ge=1)
+    page_size: int = Field(default=10, ge=1, le=100)
+    search: str = ""
+    status: str = "ALL"
+    date_from: date | None = None
+    date_to: date | None = None
+    selected_date: date | None = None
+    calendar_from: date | None = None
+    calendar_to: date | None = None
+    sort: str = Field(default="newest", pattern="^(newest|oldest|amount-low|amount-high)$")
+
+
+def paginated_orders(query, params: OrderListParams, db: Session) -> dict:
+    # Scope is established by the caller before either aggregates or rows are read.
+    visit_date = func.coalesce(Reservation.reservation_date, func.date(FoodOrder.created_at))
+    query = query.outerjoin(Reservation, Reservation.id == FoodOrder.reservation_id)
+    calendar_query = query
+    if params.calendar_from:
+        calendar_query = calendar_query.filter(visit_date >= params.calendar_from)
+    if params.calendar_to:
+        calendar_query = calendar_query.filter(visit_date <= params.calendar_to)
+    calendar_counts = {}
+    calendar_statuses = {}
+    for day, status, count in calendar_query.with_entities(visit_date, FoodOrder.status, func.count(FoodOrder.id)).group_by(visit_date, FoodOrder.status).all():
+        key = str(day)
+        calendar_counts[key] = calendar_counts.get(key, 0) + count
+        calendar_statuses.setdefault(key, []).append(status)
+    if params.search.strip():
+        needle = f"%{params.search.strip()}%"
+        table_match = db.query(ReservationTable.reservation_id).join(DiningTable, DiningTable.id == ReservationTable.table_id).filter(DiningTable.table_number.ilike(needle))
+        query = query.outerjoin(Restaurant, Restaurant.id == FoodOrder.restaurant_id).outerjoin(User, User.id == FoodOrder.customer_id).filter(or_(
+            cast(FoodOrder.id, String).ilike(needle), Restaurant.name.ilike(needle), User.name.ilike(needle),
+            User.email.ilike(needle), FoodOrder.guest_name.ilike(needle), cast(FoodOrder.items, String).ilike(needle), FoodOrder.reservation_id.in_(table_match),
+            FoodOrder.table_id.in_(db.query(DiningTable.id).filter(DiningTable.table_number.ilike(needle)))))
+    if params.status == "ACTIVE":
+        query = query.filter(FoodOrder.status.in_(["PLACED", "ACCEPTED", "PREPARING", "READY"]))
+    elif params.status != "ALL":
+        query = query.filter(FoodOrder.status == params.status)
+    if params.selected_date:
+        query = query.filter(visit_date == params.selected_date)
+    if params.date_from:
+        query = query.filter(func.date(FoodOrder.created_at) >= params.date_from)
+    if params.date_to:
+        query = query.filter(func.date(FoodOrder.created_at) <= params.date_to)
+    total, guests = query.with_entities(func.count(FoodOrder.id), func.coalesce(func.sum(Reservation.number_of_guests), 0)).one()
+    ordering = {"newest": FoodOrder.created_at.desc(), "oldest": FoodOrder.created_at.asc(),
+                "amount-low": FoodOrder.total.asc(), "amount-high": FoodOrder.total.desc()}[params.sort]
+    rows = query.order_by(ordering, FoodOrder.id).offset((params.page - 1) * params.page_size).limit(params.page_size).all()
+    return {"items": [serialize(row, db) for row in rows], "total": total, "guests": guests,
+            "page": params.page, "page_size": params.page_size, "calendar_counts": calendar_counts, "calendar_statuses": calendar_statuses}
+
+
 @customer_router.get("")
-def customer_orders(customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> list[dict]:
-    rows = db.query(FoodOrder).filter(FoodOrder.customer_id == customer.id).order_by(FoodOrder.created_at.desc()).all()
-    return [serialize(row, db) for row in rows]
+def customer_orders(customer: User = Depends(current_customer), db: Session = Depends(get_db), params: OrderListParams = Depends()):
+    query = db.query(FoodOrder).filter(FoodOrder.customer_id == customer.id)
+    if isinstance(params, OrderListParams) and params.page is not None:
+        return paginated_orders(query, params, db)
+    return [serialize(row, db) for row in query.order_by(FoodOrder.created_at.desc()).all()]
 
 
 @customer_router.post("/{order_id}/cancel")
@@ -640,8 +702,10 @@ def cancel_customer_order(order_id: uuid.UUID, payload: CustomerOrderCancellatio
         if account is None:
             raise HTTPException(status_code=409, detail="Wallet refund could not be completed. Contact support.")
         account.balance = Decimal(account.balance) + Decimal(row.total)
-        db.add(WalletTransaction(user_id=customer.id, amount=Decimal(row.total), transaction_type="REFUND",
-            description="Wallet refund for cancelled food order", reference=f"food-order:{row.id}"))
+        wallet_transaction = WalletTransaction(user_id=customer.id, amount=Decimal(row.total), transaction_type="REFUND",
+            description="Wallet refund for cancelled food order", reference=f"food-order:{row.id}")
+        db.add(wallet_transaction)
+        notify_wallet_transaction(db, wallet_transaction)
         if row.payment_method in {"WALLET", "RAZORPAY"}:
             reverse_restaurant_payment(db, row.restaurant_id, Decimal(row.total),
                 f"Customer wallet refund · ORD-{row.id.hex[:8].upper()}", f"customer-refund:order:{row.id}")
@@ -681,9 +745,11 @@ def update_status(order_id: uuid.UUID, next_status: str, allowed: dict, staff: U
                 if account is None:
                     raise HTTPException(status_code=409, detail="Wallet refund could not be completed. Contact support.")
                 account.balance = Decimal(account.balance) + Decimal(row.total)
-                db.add(WalletTransaction(user_id=row.customer_id, reservation_id=row.reservation_id,
+                wallet_transaction = WalletTransaction(user_id=row.customer_id, reservation_id=row.reservation_id,
                     amount=Decimal(row.total), transaction_type="REFUND",
-                    description="Wallet refund for cancelled reservation preorder", reference=f"food-order:{row.id}"))
+                    description="Wallet refund for cancelled reservation preorder", reference=f"food-order:{row.id}")
+                db.add(wallet_transaction)
+                notify_wallet_transaction(db, wallet_transaction)
                 reverse_restaurant_payment(db, row.restaurant_id, Decimal(row.total),
                     f"Customer wallet refund · preorder ORD-{row.id.hex[:8].upper()}", f"customer-refund:order:{row.id}")
             if reservation is not None:
@@ -723,8 +789,79 @@ def update_status(order_id: uuid.UUID, next_status: str, allowed: dict, staff: U
 
 
 @manager_router.get("")
-def manager_orders(manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> list[dict]:
+def manager_orders(manager: User = Depends(current_manager), db: Session = Depends(get_db), params: OrderListParams = Depends()):
+    if isinstance(params, OrderListParams) and params.page is not None:
+        restaurant = staff_restaurant(manager, db)
+        return paginated_orders(db.query(FoodOrder).filter(FoodOrder.restaurant_id == restaurant.id), params, db)
     return list_for_staff(manager, db)
+
+
+def spot_order_totals(payload: SpotOrderPreviewInput, restaurant_id: uuid.UUID, db: Session) -> tuple[dict, FoodOrderOffer | None]:
+    quantities: dict[uuid.UUID, int] = {}
+    for line in payload.items:
+        quantities[line.variant_id] = quantities.get(line.variant_id, 0) + line.quantity
+    if len(quantities) != len(payload.items):
+        raise HTTPException(status_code=422, detail="Each menu option can only appear once in an order.")
+    variants = db.query(FoodVariant).join(Food, FoodVariant.food_id == Food.id).join(Category, Food.category_id == Category.id).filter(
+        FoodVariant.id.in_(quantities), Food.restaurant_id == restaurant_id,
+        Food.is_available.is_(True), Food.deleted_at.is_(None), FoodVariant.is_available.is_(True), FoodVariant.deleted_at.is_(None),
+        Category.is_active.is_(True), Category.deleted_at.is_(None),
+    ).with_for_update().all()
+    by_id = {variant.id: variant for variant in variants}
+    if set(by_id) != set(quantities):
+        raise HTTPException(status_code=409, detail="One or more menu items are unavailable at this restaurant.")
+    snapshots = []
+    subtotal = Decimal("0.00")
+    for variant_id, quantity in quantities.items():
+        variant = by_id[variant_id]
+        price = Decimal(variant.price).quantize(CENT, rounding=ROUND_HALF_UP)
+        line_total = (price * quantity).quantize(CENT, rounding=ROUND_HALF_UP)
+        subtotal += line_total
+        snapshots.append({"variant_id": str(variant.id), "food_name": variant.food.name,
+            "description": variant.food.description, "image_url": variant.food.image.image_url if variant.food.image else None,
+            "variant_name": variant.name, "quantity": quantity, "unit_price": float(price), "line_total": float(line_total)})
+    subtotal = subtotal.quantize(CENT, rounding=ROUND_HALF_UP)
+    offer = None
+    discount = Decimal("0.00")
+    code = (payload.offer_code or "").strip().upper()
+    if code:
+        offer = db.query(FoodOrderOffer).filter(
+            FoodOrderOffer.restaurant_id == restaurant_id,
+            func.upper(FoodOrderOffer.code) == code,
+        ).with_for_update().first()
+        now = datetime.now(timezone.utc)
+        if (offer is None or not offer.is_active
+                or (offer.starts_at and utc_instant(offer.starts_at) > now)
+                or (offer.ends_at and utc_instant(offer.ends_at) < now)
+                or (offer.max_uses is not None and offer.uses >= offer.max_uses)):
+            raise HTTPException(status_code=422, detail="This offer is invalid, expired, or fully redeemed.")
+        if offer.per_customer_limit is not None:
+            raise HTTPException(status_code=422, detail="This offer requires a customer account and cannot be used for a walk-in guest.")
+        eligible = Decimal("0.00")
+        for variant_id, quantity in quantities.items():
+            variant = by_id[variant_id]
+            if (offer.applicability == "RESTAURANT"
+                    or (offer.applicability == "ITEMS" and str(variant.food_id) in offer.eligible_food_ids)
+                    or (offer.applicability == "CATEGORIES" and str(variant.food.category_id) in offer.eligible_category_ids)):
+                eligible += Decimal(variant.price).quantize(CENT, rounding=ROUND_HALF_UP) * quantity
+        if eligible <= 0 or eligible < Decimal(offer.minimum_subtotal):
+            raise HTTPException(status_code=422, detail="The selected items do not meet this offer's eligibility or minimum subtotal.")
+        discount = calculate_offer_discount(offer, eligible)
+    taxable = (subtotal - discount).quantize(CENT, rounding=ROUND_HALF_UP)
+    tax_percent = Decimal(settings.order_tax_percent).quantize(CENT, rounding=ROUND_HALF_UP)
+    tax_amount = (taxable * tax_percent / Decimal("100")).quantize(CENT, rounding=ROUND_HALF_UP)
+    return dict(items=snapshots, subtotal=subtotal, discount_amount=discount,
+        offer_id=offer.id if offer else None, offer_code=offer.code if offer else None,
+        tax_percent=tax_percent, tax_amount=tax_amount,
+        total=(taxable + tax_amount).quantize(CENT, rounding=ROUND_HALF_UP)), offer
+
+
+@manager_router.post("/spot/preview")
+def manager_preview_spot_order(payload: SpotOrderPreviewInput, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
+    restaurant = staff_restaurant(manager, db)
+    totals, _ = spot_order_totals(payload, restaurant.id, db)
+    return {key: float(value) if isinstance(value, Decimal) else str(value) if isinstance(value, uuid.UUID) else value
+        for key, value in totals.items()}
 
 
 @manager_router.post("/spot", status_code=201)
@@ -743,41 +880,17 @@ def manager_create_spot_order(payload: SpotOrderInput, manager: User = Depends(c
             raise HTTPException(status_code=404, detail="Table not found for this restaurant.")
         if table.status != "available":
             raise HTTPException(status_code=409, detail="This table is not available for a spot order.")
-        quantities: dict[uuid.UUID, int] = {}
-        for line in payload.items:
-            quantities[line.variant_id] = quantities.get(line.variant_id, 0) + line.quantity
-        if len(quantities) != len(payload.items):
-            raise HTTPException(status_code=422, detail="Each menu option can only appear once in an order.")
-        variants = db.query(FoodVariant).join(Food, FoodVariant.food_id == Food.id).join(Category, Food.category_id == Category.id).filter(
-            FoodVariant.id.in_(quantities), Food.restaurant_id == restaurant.id,
-            Food.is_available.is_(True), Food.deleted_at.is_(None), FoodVariant.is_available.is_(True), FoodVariant.deleted_at.is_(None),
-            Category.is_active.is_(True), Category.deleted_at.is_(None),
-        ).with_for_update().all()
-        by_id = {variant.id: variant for variant in variants}
-        if set(by_id) != set(quantities):
-            raise HTTPException(status_code=409, detail="One or more menu items are unavailable at this restaurant.")
-        snapshots = []
-        subtotal = Decimal("0.00")
-        for variant_id, quantity in quantities.items():
-            variant = by_id[variant_id]
-            price = Decimal(variant.price).quantize(CENT, rounding=ROUND_HALF_UP)
-            line_total = (price * quantity).quantize(CENT, rounding=ROUND_HALF_UP)
-            subtotal += line_total
-            snapshots.append({"variant_id": str(variant.id), "food_name": variant.food.name,
-                "description": variant.food.description, "image_url": variant.food.image.image_url if variant.food.image else None,
-                "variant_name": variant.name, "quantity": quantity, "unit_price": float(price), "line_total": float(line_total)})
-        subtotal = subtotal.quantize(CENT, rounding=ROUND_HALF_UP)
-        tax_percent = Decimal(settings.order_tax_percent).quantize(CENT, rounding=ROUND_HALF_UP)
-        tax_amount = (subtotal * tax_percent / Decimal("100")).quantize(CENT, rounding=ROUND_HALF_UP)
-        total = (subtotal + tax_amount).quantize(CENT, rounding=ROUND_HALF_UP)
+        totals, offer = spot_order_totals(payload, restaurant.id, db)
         order = FoodOrder(customer_id=None, guest_name=payload.guest_name, table_id=table.id,
-            restaurant_id=restaurant.id, idempotency_key=payload.idempotency_key, items=snapshots,
-            subtotal=subtotal, discount_amount=Decimal("0.00"), tax_percent=tax_percent,
-            tax_amount=tax_amount, total=total, status="PLACED",
+            restaurant_id=restaurant.id, idempotency_key=payload.idempotency_key, **totals, status="ACCEPTED",
             payment_method="PAY_AT_DESK", payment_status="PENDING", customer_note=payload.customer_note)
         table.status = "occupied"
         db.add(order)
         db.flush()
+        if offer is not None:
+            offer.uses += 1
+            db.add(OfferRedemption(offer_id=offer.id, order_id=order.id, customer_id=None,
+                discount_amount=totals["discount_amount"], status="APPLIED"))
         record_order_event(db, order, actor=manager)
         db.commit()
         db.refresh(order)
@@ -1137,7 +1250,10 @@ def admin_offer_redemption_detail(redemption_id: uuid.UUID, admin: User = Depend
 
 
 @chef_router.get("")
-def chef_orders(chef: User = Depends(current_chef), db: Session = Depends(get_db)) -> list[dict]:
+def chef_orders(chef: User = Depends(current_chef), db: Session = Depends(get_db), params: OrderListParams = Depends()):
+    if isinstance(params, OrderListParams) and params.page is not None:
+        restaurant = staff_restaurant(chef, db)
+        return paginated_orders(db.query(FoodOrder).filter(FoodOrder.restaurant_id == restaurant.id), params, db)
     return list_for_staff(chef, db)
 
 
@@ -1147,10 +1263,12 @@ def chef_update_order(order_id: uuid.UUID, payload: StatusInput, chef: User = De
 
 
 @admin_router.get("")
-def admin_orders(restaurant_id: uuid.UUID | None = None, limit: int = Query(default=100, ge=1, le=500), admin: User = Depends(current_admin), db: Session = Depends(get_db)) -> list[dict]:
+def admin_orders(restaurant_id: uuid.UUID | None = None, limit: int = Query(default=100, ge=1, le=500), admin: User = Depends(current_admin), db: Session = Depends(get_db), params: OrderListParams = Depends()):
     query = db.query(FoodOrder)
     if restaurant_id:
         query = query.filter(FoodOrder.restaurant_id == restaurant_id)
+    if isinstance(params, OrderListParams) and params.page is not None:
+        return paginated_orders(query, params, db)
     return [serialize(row, db) for row in query.order_by(FoodOrder.created_at.desc()).limit(limit).all()]
 
 

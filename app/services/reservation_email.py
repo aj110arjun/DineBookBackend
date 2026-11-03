@@ -14,6 +14,7 @@ from app.models.reservation import Reservation, ReservationTable
 from app.models.restaurant import Restaurant
 from app.models.user import User
 from app.services.reservation_invoice_pdf import build_reservation_invoice_pdf
+from app.services.reservation_pass import build_reservation_pass_png
 
 logger = logging.getLogger(__name__)
 
@@ -91,15 +92,16 @@ def send_reservation_confirmation(db: Session, reservation_id: uuid.UUID) -> boo
         if has_preorder else "No preorder was added to this reservation."
     )
     intro = f"Hi {customer.name}, your reservation at {restaurant.name} is confirmed. The reservation fee has been paid. Your booking reference is {reservation_code}."
-    detail = f"{preorder_message} Your invoice is attached as a PDF."
+    detail = f"{preorder_message} Your invoice PDF and reservation pass image are attached. Present the pass when you arrive."
     plain = "\n".join([
         f"Hi {customer.name},", "", f"Your reservation at {restaurant.name} is confirmed. Reference: {reservation_code}.",
         f"Date: {item.reservation_date.isoformat()} at {item.start_time.strftime('%I:%M %p')}",
         f"Reservation fee: {_status(item.payment_method, item.payment_status, item.fee_amount)}",
-        preorder_message, "The invoice is attached as a PDF.", "", "Warmly,", "The DineBook team",
+        preorder_message, "Your invoice PDF and reservation pass image are attached. Present the pass when you arrive.", "", "Warmly,", "The DineBook team",
     ])
 
     try:
+        reservation_pass = build_reservation_pass_png(item, restaurant, customer, tables, reservation_code)
         send_branded_email(
             to=customer.email,
             subject=f"Reservation confirmed · {restaurant.name}",
@@ -111,7 +113,10 @@ def send_reservation_confirmation(db: Session, reservation_id: uuid.UUID) -> boo
             highlight_label="Reservation code",
             highlight_value=reservation_code,
             summary_rows=summary_rows,
-            attachments=[("DineBook-reservation-invoice.pdf", invoice, "application", "pdf")],
+            attachments=[
+                ("DineBook-reservation-invoice.pdf", invoice, "application", "pdf"),
+                (f"DineBook-pass-{reservation_code}.png", reservation_pass, "image", "png"),
+            ],
         )
     except Exception:
         logger.exception("Failed to send reservation confirmation email for %s", reservation_id)

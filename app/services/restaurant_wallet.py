@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from app.models.restaurant import Restaurant
 from app.models.user import User
 from app.models.wallet import WalletAccount, WalletTransaction
+from app.services.notifications import notify_wallet_transaction
+
 
 CENT = Decimal("0.01")
 
@@ -28,8 +30,10 @@ def record_restaurant_payment(db: Session, restaurant_id: uuid.UUID, amount: Dec
         db.add(account)
         db.flush()
     account.balance = Decimal(account.balance) + amount
-    db.add(WalletTransaction(user_id=restaurant.manager_id, amount=amount, transaction_type="CREDIT",
-        description=description, reference=reference))
+    transaction = WalletTransaction(user_id=restaurant.manager_id, amount=amount, transaction_type="CREDIT",
+        description=description, reference=reference)
+    db.add(transaction)
+    notify_wallet_transaction(db, transaction)
 
 
 def reverse_restaurant_payment(db: Session, restaurant_id: uuid.UUID, amount: Decimal,
@@ -48,5 +52,7 @@ def reverse_restaurant_payment(db: Session, restaurant_id: uuid.UUID, amount: De
         db.add(account)
         db.flush()
     account.balance = Decimal(account.balance) - amount
-    db.add(WalletTransaction(user_id=restaurant.manager_id, amount=-amount, transaction_type="DEBIT",
-        description=description, reference=reference))
+    transaction = WalletTransaction(user_id=restaurant.manager_id, amount=-amount, transaction_type="DEBIT",
+        description=description, reference=reference)
+    db.add(transaction)
+    notify_wallet_transaction(db, transaction)

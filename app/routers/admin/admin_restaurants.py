@@ -1,7 +1,8 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.database import get_db
@@ -11,6 +12,7 @@ from app.models.restaurant_hours import RestaurantHours
 from app.models.menu import Category, Food
 from app.models.user import User, UserRole
 from app.services.notifications import create_notification
+from app.services.menu_listing import menu_page
 from app.core.email import send_branded_email
 from app.routers.auth.admin_auth import current_admin
 
@@ -72,22 +74,40 @@ def resume_restaurant(restaurant_id: uuid.UUID, admin: User = Depends(current_ad
     return {"id": str(restaurant.id), "status": restaurant.status.value}
 
 
-@router.get("", response_model=list[dict])
+@router.get("")
 def list_restaurants(
-    admin: User = Depends(current_admin),
-    db: Session = Depends(get_db),
-) -> list[dict]:
-    records = (
-        db.query(Restaurant, User)
-        .join(User, User.id == Restaurant.manager_id)
-        .filter(
-            User.role == UserRole.MANAGER,
-            Restaurant.status.in_((RestaurantStatus.APPROVED, RestaurantStatus.SUSPENDED)),
-        )
-        .order_by(Restaurant.created_at.desc())
-        .all()
+    admin: User = Depends(current_admin), db: Session = Depends(get_db),
+    page: int | None = Query(None, ge=1), page_size: int = Query(10, ge=1, le=100),
+    search: str = "", cuisine: str = "", location: str = "", status: str = "",
+    sort: str = Query("newest", pattern="^(newest|oldest|name)$"),
+):
+    query = db.query(Restaurant, User).join(User, User.id == Restaurant.manager_id).filter(
+        User.role == UserRole.MANAGER,
+        Restaurant.status.in_((RestaurantStatus.APPROVED, RestaurantStatus.SUSPENDED)),
     )
-    return [
+    if not isinstance(page, int):
+        records = query.order_by(Restaurant.created_at.desc()).all()
+    else:
+        options = query.with_entities(Restaurant.cuisine_type, Restaurant.city, Restaurant.state).distinct().all()
+        locations = sorted({", ".join(part for part in (city, state) if part) for _, city, state in options} - {""})
+        cuisines = sorted({c for c, _, _ in options if c})
+        if search.strip():
+            needle = f"%{search.strip()}%"
+            query = query.filter(or_(*(column.ilike(needle) for column in (
+                Restaurant.name, Restaurant.cuisine_type, Restaurant.city, Restaurant.state, User.name, User.email))))
+        if cuisine:
+            query = query.filter(Restaurant.cuisine_type == cuisine)
+        if location:
+            query = query.filter(or_(*( (Restaurant.city == city) & (Restaurant.state == state)
+                for _, city, state in options if ", ".join(part for part in (city, state) if part) == location)))
+        if status:
+            if status not in {"APPROVED", "SUSPENDED"}:
+                raise HTTPException(422, "Invalid restaurant status.")
+            query = query.filter(Restaurant.status == status)
+        total = query.count()
+        ordering = Restaurant.name.asc() if sort == "name" else (Restaurant.created_at.asc() if sort == "oldest" else Restaurant.created_at.desc())
+        records = query.order_by(ordering, Restaurant.id).offset((page - 1) * page_size).limit(page_size).all()
+    items = [
         {
             "id": str(restaurant.id),
             "name": restaurant.name,
@@ -106,10 +126,25 @@ def list_restaurants(
         for restaurant, manager in records
     ]
 
+    if not isinstance(page, int):
+        return items
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "cuisines": cuisines, "locations": locations}
+
+
+@router.get("/{restaurant_id}/menu")
+def admin_restaurant_menu(restaurant_id: uuid.UUID, admin: User = Depends(current_admin), db: Session = Depends(get_db),
+    page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100), search: str = "",
+    category_id: uuid.UUID | None = None, availability: str = Query("ALL", pattern="^(ALL|AVAILABLE|UNAVAILABLE)$"),
+    sort: str = Query("name", pattern="^(name|name-desc|price-low|price-high)$")):
+    return menu_page(db, restaurant_id, page=page, page_size=page_size, search=search,
+                     category_id=category_id, availability=availability, sort=sort)
+
 
 @router.get("/{restaurant_id}", response_model=dict)
 def get_restaurant_details(
     restaurant_id: uuid.UUID,
+    include_menu: bool = True,
     admin: User = Depends(current_admin),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -147,7 +182,7 @@ def get_restaurant_details(
     menu_categories = (
         db.query(Category).options(selectinload(Category.foods).selectinload(Food.variants), selectinload(Category.foods).selectinload(Food.image))
         .filter(Category.restaurant_id == restaurant.id, Category.deleted_at.is_(None))
-        .order_by(Category.display_order, Category.name).all()
+        .order_by(Category.display_order, Category.name).all() if include_menu else []
     )
 
     return {

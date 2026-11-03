@@ -18,6 +18,8 @@ from app.models.wallet import WalletAccount, WalletTransaction, WalletTransfer
 from app.routers.auth.admin_auth import current_admin
 from app.routers.auth.chef_auth import current_chef
 from app.routers.auth.manager_auth import current_manager
+from app.services.notifications import notify_wallet_transaction
+
 
 admin_router = APIRouter(prefix="/api/admin/revenue", tags=["revenue wallets"])
 manager_router = APIRouter(prefix="/api/manager/revenue", tags=["revenue wallets"])
@@ -302,16 +304,21 @@ def pay_admin_commission(payload: CommissionPayoutRequest, manager: User = Depen
     amount = sum((Decimal(row.commission_amount) for row in commission_rows), Decimal("0.00")).quantize(CENT)
     if amount <= 0:
         raise HTTPException(status_code=409, detail="There is no unpaid admin commission to transfer.")
+
     if amount != payload.amount:
         raise HTTPException(status_code=409, detail="The unpaid commission total changed. Refresh the page and confirm the updated amount.")
 
     manager_wallet = db.query(WalletAccount).filter(WalletAccount.user_id == manager.id).with_for_update().first()
+
     if manager_wallet is None or Decimal(manager_wallet.balance) < amount:
         available = Decimal(manager_wallet.balance) if manager_wallet is not None else Decimal("0.00")
         raise HTTPException(status_code=409, detail=f"Your wallet has {available:.2f}; {amount:.2f} is due to the admin.")
+
     admin = db.query(User).filter(User.role == UserRole.ADMIN, User.is_active.is_(True)).order_by(User.created_at.asc()).first()
+
     if admin is None:
         raise HTTPException(status_code=409, detail="An active admin wallet is not available.")
+
     admin_wallet = db.query(WalletAccount).filter(WalletAccount.user_id == admin.id).with_for_update().first()
     if admin_wallet is None:
         admin_wallet = WalletAccount(user_id=admin.id, balance=Decimal("0.00"))
@@ -321,14 +328,23 @@ def pay_admin_commission(payload: CommissionPayoutRequest, manager: User = Depen
     payout = PlatformCommissionPayout(manager_id=manager.id, admin_id=admin.id, amount=amount)
     db.add(payout)
     db.flush()
+
     for row in commission_rows:
         row.payout_id = payout.id
+
     manager_wallet.balance = Decimal(manager_wallet.balance) - amount
     admin_wallet.balance = Decimal(admin_wallet.balance) + amount
-    db.add(WalletTransaction(user_id=manager.id, amount=-amount, transaction_type="DEBIT",
-        description="Admin commission payout", reference=f"admin-commission-payout:{payout.id}"))
-    db.add(WalletTransaction(user_id=admin.id, amount=amount, transaction_type="CREDIT",
-        description=f"Admin commission from {manager.name}", reference=f"admin-commission-payout:{payout.id}"))
+    
+    manager_transaction = WalletTransaction(user_id=manager.id, amount=-amount, transaction_type="DEBIT",
+        description="Admin commission payout", reference=f"admin-commission-payout:{payout.id}")
+    admin_transaction = WalletTransaction(user_id=admin.id, amount=amount, transaction_type="CREDIT",
+        description=f"Admin commission from {manager.name}", reference=f"admin-commission-payout:{payout.id}")
+
+    db.add(manager_transaction)
+    db.add(admin_transaction)
+    
+    notify_wallet_transaction(db, manager_transaction)
+    notify_wallet_transaction(db, admin_transaction)
     db.commit()
     return {"message": "Admin commission transferred.", "amount": float(amount),
         "manager_balance": float(manager_wallet.balance), "admin_balance": float(admin_wallet.balance)}

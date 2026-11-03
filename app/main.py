@@ -27,7 +27,7 @@ from app.routers.auth.customer_auth import session_router
 from app.routers.commerce.wallet import customer_router as customer_wallet_router, admin_router as admin_wallet_router, manager_router as manager_wallet_router, chef_wallet_router
 from app.routers.commerce.orders import customer_router as customer_orders_router, customer_reservation_orders_router, manager_router as manager_orders_router, manager_reservation_orders_router, chef_router as chef_orders_router, chef_reservation_orders_router, admin_router as admin_orders_router
 from app.routers.commerce.webhooks import router as webhooks_router
-from app.routers.commerce.payments import manager_router as manager_payments_router, admin_router as admin_payments_router
+from app.routers.commerce.payments import manager_router as manager_payments_router, admin_router as admin_payments_router, transactions_router as admin_transactions_router
 from app.routers.events.realtime import router as realtime_router
 from app.routers.events.notifications import router as notifications_router
 from app.routers.restaurants.operating_hours import admin_router as admin_operating_hours_router, chef_router as chef_operating_hours_router, customer_router as customer_operating_hours_router, manager_router as manager_operating_hours_router
@@ -182,6 +182,7 @@ app.include_router(admin_orders_router)
 app.include_router(webhooks_router)
 app.include_router(manager_payments_router)
 app.include_router(admin_payments_router)
+app.include_router(admin_transactions_router)
 app.include_router(realtime_router)
 app.include_router(notifications_router)
 app.include_router(customer_operating_hours_router)
