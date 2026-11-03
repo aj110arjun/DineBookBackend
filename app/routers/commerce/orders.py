@@ -1,12 +1,12 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
-from sqlalchemy import func, or_
+from sqlalchemy import String, cast, func, or_
 from sqlalchemy.exc import IntegrityError
 
 from app.db.database import get_db
@@ -628,10 +628,65 @@ def chef_reservation_orders(reservation_id: uuid.UUID, chef: User = Depends(curr
     rows = db.query(FoodOrder).filter(FoodOrder.reservation_id == reservation.id).order_by(FoodOrder.created_at.asc()).all()
     return [serialize(row, db) for row in rows]
     
+class OrderListParams(BaseModel):
+    page: int | None = Field(default=None, ge=1)
+    page_size: int = Field(default=10, ge=1, le=100)
+    search: str = ""
+    status: str = "ALL"
+    date_from: date | None = None
+    date_to: date | None = None
+    selected_date: date | None = None
+    calendar_from: date | None = None
+    calendar_to: date | None = None
+    sort: str = Field(default="newest", pattern="^(newest|oldest|amount-low|amount-high)$")
+
+
+def paginated_orders(query, params: OrderListParams, db: Session) -> dict:
+    # Scope is established by the caller before either aggregates or rows are read.
+    visit_date = func.coalesce(Reservation.reservation_date, func.date(FoodOrder.created_at))
+    query = query.outerjoin(Reservation, Reservation.id == FoodOrder.reservation_id)
+    calendar_query = query
+    if params.calendar_from:
+        calendar_query = calendar_query.filter(visit_date >= params.calendar_from)
+    if params.calendar_to:
+        calendar_query = calendar_query.filter(visit_date <= params.calendar_to)
+    calendar_counts = {}
+    calendar_statuses = {}
+    for day, status, count in calendar_query.with_entities(visit_date, FoodOrder.status, func.count(FoodOrder.id)).group_by(visit_date, FoodOrder.status).all():
+        key = str(day)
+        calendar_counts[key] = calendar_counts.get(key, 0) + count
+        calendar_statuses.setdefault(key, []).append(status)
+    if params.search.strip():
+        needle = f"%{params.search.strip()}%"
+        table_match = db.query(ReservationTable.reservation_id).join(DiningTable, DiningTable.id == ReservationTable.table_id).filter(DiningTable.table_number.ilike(needle))
+        query = query.outerjoin(Restaurant, Restaurant.id == FoodOrder.restaurant_id).outerjoin(User, User.id == FoodOrder.customer_id).filter(or_(
+            cast(FoodOrder.id, String).ilike(needle), Restaurant.name.ilike(needle), User.name.ilike(needle),
+            User.email.ilike(needle), FoodOrder.guest_name.ilike(needle), cast(FoodOrder.items, String).ilike(needle), FoodOrder.reservation_id.in_(table_match),
+            FoodOrder.table_id.in_(db.query(DiningTable.id).filter(DiningTable.table_number.ilike(needle)))))
+    if params.status == "ACTIVE":
+        query = query.filter(FoodOrder.status.in_(["PLACED", "ACCEPTED", "PREPARING", "READY"]))
+    elif params.status != "ALL":
+        query = query.filter(FoodOrder.status == params.status)
+    if params.selected_date:
+        query = query.filter(visit_date == params.selected_date)
+    if params.date_from:
+        query = query.filter(func.date(FoodOrder.created_at) >= params.date_from)
+    if params.date_to:
+        query = query.filter(func.date(FoodOrder.created_at) <= params.date_to)
+    total, guests = query.with_entities(func.count(FoodOrder.id), func.coalesce(func.sum(Reservation.number_of_guests), 0)).one()
+    ordering = {"newest": FoodOrder.created_at.desc(), "oldest": FoodOrder.created_at.asc(),
+                "amount-low": FoodOrder.total.asc(), "amount-high": FoodOrder.total.desc()}[params.sort]
+    rows = query.order_by(ordering, FoodOrder.id).offset((params.page - 1) * params.page_size).limit(params.page_size).all()
+    return {"items": [serialize(row, db) for row in rows], "total": total, "guests": guests,
+            "page": params.page, "page_size": params.page_size, "calendar_counts": calendar_counts, "calendar_statuses": calendar_statuses}
+
+
 @customer_router.get("")
-def customer_orders(customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> list[dict]:
-    rows = db.query(FoodOrder).filter(FoodOrder.customer_id == customer.id).order_by(FoodOrder.created_at.desc()).all()
-    return [serialize(row, db) for row in rows]
+def customer_orders(customer: User = Depends(current_customer), db: Session = Depends(get_db), params: OrderListParams = Depends()):
+    query = db.query(FoodOrder).filter(FoodOrder.customer_id == customer.id)
+    if isinstance(params, OrderListParams) and params.page is not None:
+        return paginated_orders(query, params, db)
+    return [serialize(row, db) for row in query.order_by(FoodOrder.created_at.desc()).all()]
 
 
 @customer_router.post("/{order_id}/cancel")
@@ -734,7 +789,10 @@ def update_status(order_id: uuid.UUID, next_status: str, allowed: dict, staff: U
 
 
 @manager_router.get("")
-def manager_orders(manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> list[dict]:
+def manager_orders(manager: User = Depends(current_manager), db: Session = Depends(get_db), params: OrderListParams = Depends()):
+    if isinstance(params, OrderListParams) and params.page is not None:
+        restaurant = staff_restaurant(manager, db)
+        return paginated_orders(db.query(FoodOrder).filter(FoodOrder.restaurant_id == restaurant.id), params, db)
     return list_for_staff(manager, db)
 
 
@@ -1192,7 +1250,10 @@ def admin_offer_redemption_detail(redemption_id: uuid.UUID, admin: User = Depend
 
 
 @chef_router.get("")
-def chef_orders(chef: User = Depends(current_chef), db: Session = Depends(get_db)) -> list[dict]:
+def chef_orders(chef: User = Depends(current_chef), db: Session = Depends(get_db), params: OrderListParams = Depends()):
+    if isinstance(params, OrderListParams) and params.page is not None:
+        restaurant = staff_restaurant(chef, db)
+        return paginated_orders(db.query(FoodOrder).filter(FoodOrder.restaurant_id == restaurant.id), params, db)
     return list_for_staff(chef, db)
 
 
@@ -1202,10 +1263,12 @@ def chef_update_order(order_id: uuid.UUID, payload: StatusInput, chef: User = De
 
 
 @admin_router.get("")
-def admin_orders(restaurant_id: uuid.UUID | None = None, limit: int = Query(default=100, ge=1, le=500), admin: User = Depends(current_admin), db: Session = Depends(get_db)) -> list[dict]:
+def admin_orders(restaurant_id: uuid.UUID | None = None, limit: int = Query(default=100, ge=1, le=500), admin: User = Depends(current_admin), db: Session = Depends(get_db), params: OrderListParams = Depends()):
     query = db.query(FoodOrder)
     if restaurant_id:
         query = query.filter(FoodOrder.restaurant_id == restaurant_id)
+    if isinstance(params, OrderListParams) and params.page is not None:
+        return paginated_orders(query, params, db)
     return [serialize(row, db) for row in query.order_by(FoodOrder.created_at.desc()).limit(limit).all()]
 
 

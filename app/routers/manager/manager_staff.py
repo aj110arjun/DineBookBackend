@@ -76,6 +76,8 @@ def send_chef_credentials(email: str, name: str, password: str) -> None:
                     "You will be asked to change this password when you first sign in."),
         error_detail="We couldn’t send the chef’s account email. Please try again.",
     )
+    
+
 
 
 

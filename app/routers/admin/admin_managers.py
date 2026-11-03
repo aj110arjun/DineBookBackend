@@ -5,7 +5,8 @@ from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, Query, status
+from sqlalchemy import String, cast, or_
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -23,20 +24,32 @@ router = APIRouter(
 )
 
 
-@router.get("/requests", response_model=list[dict])
+@router.get("/requests")
 def get_manager_requests(
-    admin: User = Depends(current_admin),
-    db: Session = Depends(get_db),
-) -> list[dict]:
-    requests = (
-        db.query(User, Restaurant)
-        .join(Restaurant, Restaurant.manager_id == User.id)
-        .filter(User.role == UserRole.MANAGER)
-        .order_by(Restaurant.created_at.asc())
-        .all()
-    )
-
-    return [
+    admin: User = Depends(current_admin), db: Session = Depends(get_db),
+    page: int | None = Query(None, ge=1), page_size: int = Query(10, ge=1, le=100),
+    search: str = "", status: str = "ALL",
+    sort: str = Query("newest", pattern="^(newest|oldest)$"),
+):
+    query = db.query(User, Restaurant).join(Restaurant, Restaurant.manager_id == User.id).filter(User.role == UserRole.MANAGER)
+    if not isinstance(page, int):
+        requests = query.order_by(Restaurant.created_at.asc()).all()
+    else:
+        counts = {"ALL": query.count()}
+        for value in ("PENDING", "APPROVED", "REJECTED"):
+            counts[value] = query.filter(Restaurant.status == value).count()
+        if status != "ALL":
+            if status not in {"PENDING", "APPROVED", "REJECTED", "SUSPENDED"}:
+                raise HTTPException(422, "Invalid application status.")
+            query = query.filter(Restaurant.status == status)
+        if search.strip():
+            needle = f"%{search.strip()}%"
+            query = query.filter(or_(*(column.ilike(needle) for column in (
+                cast(User.id, String), User.name, User.email, Restaurant.name, Restaurant.city, Restaurant.cuisine_type))))
+        total = query.count()
+        ordering = User.created_at.asc() if sort == "oldest" else User.created_at.desc()
+        requests = query.order_by(ordering, User.id).offset((page - 1) * page_size).limit(page_size).all()
+    items = [
         {
             "id": str(manager.id),
             "name": manager.name,
@@ -55,6 +68,10 @@ def get_manager_requests(
         }
         for manager, restaurant in requests
     ]
+
+    if not isinstance(page, int):
+        return items
+    return {"items": items, "total": total, "page": page, "page_size": page_size, "status_counts": counts}
 
 @router.get("/requests/{manager_id}", response_model=dict)
 def get_manager_request_details(

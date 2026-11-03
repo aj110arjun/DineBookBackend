@@ -515,9 +515,46 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
 
 
 @customer_router.get("")
-def my_reservations(customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> list[dict]:
-    items = db.query(Reservation).filter(Reservation.user_id == customer.id).order_by(Reservation.reservation_date.desc(), Reservation.start_time.desc()).all()
-    return [reservation_data(item, db) for item in items]
+def my_reservations(
+    customer: User = Depends(current_customer), db: Session = Depends(get_db),
+    page: int | None = Query(None, ge=1), page_size: int = Query(10, ge=1, le=100),
+    search: str = "", status: str = "ALL", restaurant_id: uuid.UUID | None = None,
+    period: str = Query("ALL", pattern="^(ALL|UPCOMING|PAST)$"),
+    date_from: date | None = None, date_to: date | None = None, today: date | None = None,
+    sort: str = Query("created-newest", pattern="^(created-newest|created-oldest|date-oldest|date-newest|fee-low|fee-high)$"),
+):
+    query = db.query(Reservation).filter(Reservation.user_id == customer.id)
+    if not isinstance(page, int):
+        items = query.order_by(Reservation.reservation_date.desc(), Reservation.start_time.desc()).all()
+        return [reservation_data(item, db) for item in items]
+    restaurants = [{"id": str(row.id), "name": row.name} for row in
+        db.query(Restaurant).join(Reservation, Reservation.restaurant_id == Restaurant.id)
+        .filter(Reservation.user_id == customer.id).distinct().order_by(Restaurant.name).all()]
+    query = query.join(Restaurant, Restaurant.id == Reservation.restaurant_id)
+    if restaurant_id:
+        query = query.filter(Reservation.restaurant_id == restaurant_id)
+    if status != "ALL":
+        query = query.filter(Reservation.status == status)
+    if search.strip():
+        needle = f"%{search.strip()}%"
+        query = query.filter(or_(cast(Reservation.id, String).ilike(needle), Restaurant.name.ilike(needle), Restaurant.city.ilike(needle), Restaurant.state.ilike(needle)))
+    today = today or datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    if period == "UPCOMING":
+        query = query.filter(Reservation.reservation_date >= today)
+    elif period == "PAST":
+        query = query.filter(Reservation.reservation_date < today)
+    if date_from:
+        query = query.filter(Reservation.reservation_date >= date_from)
+    if date_to:
+        query = query.filter(Reservation.reservation_date <= date_to)
+    total = query.count()
+    ordering = {"created-newest": [Reservation.created_at.desc()], "created-oldest": [Reservation.created_at.asc()],
+                "date-oldest": [Reservation.reservation_date.asc(), Reservation.start_time.asc()],
+                "date-newest": [Reservation.reservation_date.desc(), Reservation.start_time.desc()],
+                "fee-low": [Reservation.fee_amount.asc()], "fee-high": [Reservation.fee_amount.desc()]}[sort]
+    items = query.order_by(*ordering, Reservation.id).offset((page - 1) * page_size).limit(page_size).all()
+    return {"items": [reservation_data(item, db) for item in items], "total": total,
+            "page": page, "page_size": page_size, "restaurants": restaurants}
 
 
 @customer_router.get("/{reservation_id}")
