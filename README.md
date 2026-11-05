@@ -204,3 +204,58 @@ All demo accounts initially use password `DineBookDemo123!`:
 Manager 4 owns the pending restaurant for testing approval workflows. Use manager 1 and chef 11 for an approved restaurant with active orders. The existing administrator account is preserved.
 
 Validate fixtures with `venv/bin/python -m unittest discover -s tests -p test_seed_demo.py`.
+
+## Automatic admin commission
+
+Confirmed reservation fees, preorders, and food orders now settle commission in
+that payment's database transaction. Digital payments credit the manager's gross
+amount, debit the recorded commission, and credit the oldest active admin's
+wallet. Desk confirmations transfer only commission and require sufficient
+manager wallet funds. A generated preorder kitchen order shares its reservation's
+commission identity, so confirming it cannot charge commission again.
+
+Full refunds reverse the original recorded commission to the original manager
+and debit the original admin, even after a rate or account status change. Like
+existing restaurant refunds, reversals may make a wallet negative when funds
+have already been spent. Original payouts and separate reversal ledger entries
+are retained, and the revenue page shows refunded and net transfer amounts.
+
+Before starting the updated API, apply the migration from `DineBookBackend`:
+
+```bash
+venv/bin/alembic upgrade head
+```
+
+For an installation with older paid transactions, pause payment traffic and rate
+changes during the one-time reconciliation. The following command previews
+historical unpaid commission and rolls back all changes:
+
+```bash
+venv/bin/python -m app.reconcile_commissions
+```
+
+Existing commission records keep their recorded rates. If older payments lack
+records, confirm the historical rate for those payments. For example, if all
+such payments used 10%, preview and apply with:
+
+```bash
+venv/bin/python -m app.reconcile_commissions --backfill-rate 10
+venv/bin/python -m app.reconcile_commissions --backfill-rate 10 --apply
+```
+
+Do not use one fallback rate for historical payments that used different rates;
+restore those individual snapshots first. Applying without an explicit fallback
+rate refuses to create missing historical snapshots. Settlement requires an
+active admin and enough manager funds and rolls back the entire apply operation
+on failure. It never credits gross historical payments again. Refunded legacy
+records are reconciled before unpaid commissions, and repeating the command does
+not transfer a settled commission twice.
+
+Revenue GET requests do not create commissions or transfer funds. The former
+manual `POST /api/manager/revenue/commission-payouts` endpoint returns HTTP 410.
+
+Run the focused payment tests with:
+
+```bash
+venv/bin/python -m unittest tests.test_auto_commission -v
+```

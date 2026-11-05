@@ -8,7 +8,7 @@ from threading import BoundedSemaphore
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 
 from app.core.security import decode_access_token
 from app.db.database import SessionLocal
@@ -82,16 +82,39 @@ def _read_events(user_id: uuid.UUID, restaurant_id: uuid.UUID | None, after_id: 
 
 
 @router.get("/stream")
-async def event_stream(request: Request, after: int = 0) -> StreamingResponse:
-    user_id, restaurant_id = _authorize_stream(request)
+async def event_stream(
+    request: Request,
+    after: int | None = None,
+) -> StreamingResponse:
+    user_id, restaurant_id = await asyncio.to_thread(
+        _authorize_stream, request
+    )
+
     last_event_header = request.headers.get("last-event-id")
+
     if last_event_header:
         try:
             after = int(last_event_header)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail="Invalid event cursor.") from exc
-    if after < 0 or after > 2**63 - 1:
-        raise HTTPException(status_code=400, detail="Invalid event cursor.")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid event cursor.",
+            ) from exc
+
+    if after is not None and (
+        after < 0 or after > 2**63 - 1
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid event cursor.",
+        )
+
+    # New subscriptions start from the latest authorized event.
+    # Reconnecting subscriptions retain their supplied cursor.
+    if after is None:
+        after = await asyncio.to_thread(
+            _latest_event_id, user_id, restaurant_id
+        )
     if not _stream_slots.acquire(blocking=False):
         raise HTTPException(status_code=503, detail="Realtime capacity is temporarily full. Please retry.")
 
@@ -101,6 +124,12 @@ async def event_stream(request: Request, after: int = 0) -> StreamingResponse:
         last_auth_check = time.monotonic()
         try:
             yield "retry: 3000\n\n"
+            yield (
+                f"id: {cursor}\n"
+                "event: stream.ready\n"
+                "data: {}\n\n"
+            )
+
             while not await request.is_disconnected():
                 try:
                     if time.monotonic() - last_auth_check >= 30:
@@ -145,3 +174,25 @@ async def event_stream(request: Request, after: int = 0) -> StreamingResponse:
         "X-Accel-Buffering": "no",
         "Connection": "keep-alive",
     })
+
+def _latest_event_id(
+    user_id: uuid.UUID,
+    restaurant_id: uuid.UUID | None,
+) -> int:
+    db = SessionLocal()
+    try:
+        scope = [RealtimeEvent.user_id == user_id]
+
+        if restaurant_id is not None:
+            scope.append(
+                RealtimeEvent.restaurant_id == restaurant_id
+            )
+
+        return int(
+            db.query(
+                func.coalesce(func.max(RealtimeEvent.id), 0)
+            ).filter(or_(*scope)).scalar()
+            or 0
+        )
+    finally:
+        db.close()

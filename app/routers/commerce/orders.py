@@ -920,6 +920,9 @@ def manager_mark_order_paid(order_id: uuid.UUID, manager: User = Depends(current
         return serialize(row, db)
     row.payment_status = "PAID"
     row.paid_at = datetime.now(timezone.utc)
+    record_restaurant_payment(db, row.restaurant_id, Decimal(row.total),
+        f"Food order ORD-{row.id.hex[:8].upper()} · Desk",
+        f"customer-payment:order:{row.id}", credit_gross=False, occurred_at=row.paid_at)
     if row.table_id is not None and row.status == "COMPLETED":
         table = db.query(DiningTable).filter(DiningTable.id == row.table_id).with_for_update().first()
         if table is not None and table.status == "occupied":

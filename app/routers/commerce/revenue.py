@@ -18,7 +18,7 @@ from app.models.wallet import WalletAccount, WalletTransaction, WalletTransfer
 from app.routers.auth.admin_auth import current_admin
 from app.routers.auth.chef_auth import current_chef
 from app.routers.auth.manager_auth import current_manager
-from app.services.notifications import notify_wallet_transaction
+from app.services.commission import recipient_admin, settings_row
 
 
 admin_router = APIRouter(prefix="/api/admin/revenue", tags=["revenue wallets"])
@@ -31,19 +31,6 @@ PREORDER_ORDER_NAMESPACE = uuid.UUID("89dd0385-bbad-4aeb-b600-bf4377641e10")
 
 class CommissionUpdate(BaseModel):
     commission_percent: Decimal = Field(ge=0, le=100, max_digits=5, decimal_places=2)
-
-
-class CommissionPayoutRequest(BaseModel):
-    amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
-
-
-def settings_row(db: Session) -> PlatformRevenueSettings:
-    row = db.query(PlatformRevenueSettings).filter(PlatformRevenueSettings.id == 1).first()
-    if row is None:
-        row = PlatformRevenueSettings(id=1, commission_percent=Decimal("10.00"))
-        db.add(row)
-        db.flush()
-    return row
 
 
 def period_bounds(period: str) -> tuple[datetime, datetime]:
@@ -110,11 +97,13 @@ def gross_revenue(db: Session, manager_ids: list[uuid.UUID] | None, period: str)
 
 def sync_commission_records(db: Session, manager_ids: list[uuid.UUID] | None,
                             commission_percent: Decimal) -> None:
-    """Snapshot a commission row once for each paid reservation fee, preorder, or food order."""
-    reservation_query = db.query(Reservation).filter(
-        Reservation.payment_status == "PAID",
-        Reservation.payment_method.in_(("WALLET", "RAZORPAY", "PAY_AT_DESK")),
-    )
+    """Backfill historical records only; never call this from a revenue GET."""
+    reservation_query = db.query(Reservation).filter(or_(
+        and_(Reservation.payment_status == "PAID",
+             Reservation.payment_method.in_(("WALLET", "RAZORPAY", "PAY_AT_DESK"))),
+        and_(Reservation.preorder_payment_status == "PAID",
+             Reservation.preorder_payment_method.in_(("WALLET", "RAZORPAY", "PAY_AT_DESK"))),
+    ))
     order_query = db.query(FoodOrder).filter(
         FoodOrder.payment_status == "PAID",
         FoodOrder.payment_method.in_(("WALLET", "RAZORPAY", "PAY_AT_DESK")),
@@ -152,7 +141,8 @@ def sync_commission_records(db: Session, manager_ids: list[uuid.UUID] | None,
     reservations = reservation_query.all()
     for row in reservations:
         fee_paid_at = row.paid_at or row.created_at
-        add_record("RESERVATION_FEE", row.id, row.restaurant_id, Decimal(row.fee_amount or 0), fee_paid_at)
+        if row.payment_status == "PAID" and row.payment_method in ("WALLET", "RAZORPAY", "PAY_AT_DESK"):
+            add_record("RESERVATION_FEE", row.id, row.restaurant_id, Decimal(row.fee_amount or 0), fee_paid_at)
         preorder_paid_at = row.preorder_paid_at or row.paid_at or row.created_at
         if (row.preorder_payment_status == "PAID" and
                 row.preorder_payment_method in ("WALLET", "RAZORPAY", "PAY_AT_DESK")):
@@ -182,7 +172,6 @@ def transferred_total(db: Session, manager_ids: list[uuid.UUID] | None, period: 
 def wallet_summary(db: Session, manager_ids: list[uuid.UUID] | None, settings: PlatformRevenueSettings,
                    chef_id: uuid.UUID | None = None) -> dict:
     commission_rate = Decimal(settings.commission_percent)
-    sync_commission_records(db, manager_ids, commission_rate)
     gross_month = gross_revenue(db, manager_ids, "month")
     gross_year = gross_revenue(db, manager_ids, "year")
     gross_all = gross_revenue(db, manager_ids, "all")
@@ -210,7 +199,7 @@ def wallet_summary(db: Session, manager_ids: list[uuid.UUID] | None, settings: P
 
     chef_month = transferred_total(db, manager_ids, "month")
     chef_year = transferred_total(db, manager_ids, "year")
-    commission_query = db.query(PlatformCommission)
+    commission_query = db.query(PlatformCommission).filter(PlatformCommission.refunded_at.is_(None))
     payout_query = db.query(PlatformCommissionPayout)
     if manager_ids is not None:
         commission_query = commission_query.filter(PlatformCommission.manager_id.in_(manager_ids))
@@ -221,19 +210,41 @@ def wallet_summary(db: Session, manager_ids: list[uuid.UUID] | None, settings: P
         PlatformCommission.occurred_at < end).with_entities(func.coalesce(func.sum(PlatformCommission.commission_amount), 0)).scalar() or 0).quantize(CENT)
     admin_year = Decimal(commission_query.filter(PlatformCommission.occurred_at >= year_start,
         PlatformCommission.occurred_at < year_end).with_entities(func.coalesce(func.sum(PlatformCommission.commission_amount), 0)).scalar() or 0).quantize(CENT)
-    admin_all = Decimal(commission_query.with_entities(func.coalesce(func.sum(PlatformCommission.commission_amount), 0)).scalar() or 0).quantize(CENT)
     pending_commission = Decimal(commission_query.filter(PlatformCommission.payout_id.is_(None)).with_entities(
         func.coalesce(func.sum(PlatformCommission.commission_amount), 0)).scalar() or 0).quantize(CENT)
     paid_out = Decimal(payout_query.with_entities(func.coalesce(func.sum(PlatformCommissionPayout.amount), 0)).scalar() or 0).quantize(CENT)
-    recent_commissions = commission_query.order_by(PlatformCommission.occurred_at.desc()).limit(50).all()
+    reversed_query = db.query(PlatformCommission).filter(
+        PlatformCommission.refunded_at.is_not(None), PlatformCommission.payout_id.is_not(None)
+    )
+    if manager_ids is not None:
+        reversed_query = reversed_query.filter(PlatformCommission.manager_id.in_(manager_ids))
+    reversed_total = Decimal(reversed_query.with_entities(
+        func.coalesce(func.sum(PlatformCommission.commission_amount), 0)
+    ).scalar() or 0).quantize(CENT)
+    reversed_month = Decimal(reversed_query.filter(
+        PlatformCommission.refunded_at >= start, PlatformCommission.refunded_at < end
+    ).with_entities(func.coalesce(func.sum(PlatformCommission.commission_amount), 0)).scalar() or 0).quantize(CENT)
+    paid_out = (paid_out - reversed_total).quantize(CENT)
+    received_month = (Decimal(payout_query.filter(
+        PlatformCommissionPayout.created_at >= start, PlatformCommissionPayout.created_at < end
+    ).with_entities(func.coalesce(func.sum(PlatformCommissionPayout.amount), 0)).scalar() or 0) - reversed_month).quantize(CENT)
+    history_query = db.query(PlatformCommission)
+    if manager_ids is not None:
+        history_query = history_query.filter(PlatformCommission.manager_id.in_(manager_ids))
+    recent_commissions = history_query.order_by(PlatformCommission.occurred_at.desc()).limit(50).all()
     recent_payouts = payout_query.order_by(PlatformCommissionPayout.created_at.desc()).limit(20).all()
+    payout_refunds = {payout_id: Decimal(amount) for payout_id, amount in db.query(
+        PlatformCommission.payout_id, func.sum(PlatformCommission.commission_amount)
+    ).filter(PlatformCommission.payout_id.in_([row.id for row in recent_payouts]),
+        PlatformCommission.refunded_at.is_not(None)
+    ).group_by(PlatformCommission.payout_id).all()}
     payout_manager_ids = {row.manager_id for row in recent_payouts}
     payout_manager_names = {row.id: row.name for row in db.query(User.id, User.name).filter(
         User.id.in_(payout_manager_ids)
     ).all()} if payout_manager_ids else {}
     admin_wallet_balance = Decimal("0.00")
     if manager_ids is None:
-        admin_user = db.query(User).filter(User.role == UserRole.ADMIN).order_by(User.created_at.asc()).first()
+        admin_user = recipient_admin(db)
         if admin_user is not None:
             admin_wallet = db.query(WalletAccount).filter(WalletAccount.user_id == admin_user.id).first()
             if admin_wallet is not None:
@@ -253,15 +264,17 @@ def wallet_summary(db: Session, manager_ids: list[uuid.UUID] | None, settings: P
         "gross_all_time": float(gross_all), "earned_this_month": float(admin_month if manager_ids is None else gross_month - admin_month),
         "earned_this_year": float(admin_year if manager_ids is None else gross_year - admin_year),
         "admin_commission_this_month": float(admin_month), "admin_commission_this_year": float(admin_year),
-        "admin_commission_outstanding": float(pending_commission if manager_ids is not None else admin_all - paid_out),
+        "admin_commission_outstanding": float(pending_commission),
         "admin_commission_paid_out": float(paid_out),
-        "admin_received_this_month": float(Decimal(payout_query.filter(PlatformCommissionPayout.created_at >= start,
-            PlatformCommissionPayout.created_at < end).with_entities(func.coalesce(func.sum(PlatformCommissionPayout.amount), 0)).scalar() or 0).quantize(CENT)),
+        "admin_received_this_month": float(received_month),
         "commission_records": [{"id": str(row.id), "type": row.source_type, "gross_amount": float(row.gross_amount),
             "commission_amount": float(row.commission_amount), "commission_percent": float(row.commission_percent),
-            "occurred_at": row.occurred_at.isoformat(), "paid": row.payout_id is not None} for row in recent_commissions],
+            "occurred_at": row.occurred_at.isoformat(), "paid": row.payout_id is not None,
+            "refunded": row.refunded_at is not None} for row in recent_commissions],
         "commission_payouts": [{"id": str(row.id), "amount": float(row.amount), "created_at": row.created_at.isoformat(),
-            "manager_name": payout_manager_names.get(row.manager_id)}
+            "manager_name": payout_manager_names.get(row.manager_id),
+            "refunded_amount": float(payout_refunds.get(row.id, 0)),
+            "net_amount": float(Decimal(row.amount) - payout_refunds.get(row.id, 0))}
             for row in recent_payouts],
         "transferred_to_chefs_this_month": float(chef_month), "transferred_to_chefs_this_year": float(chef_year),
         "commission_percent": float(commission_rate), "chefs": [
@@ -285,69 +298,14 @@ def admin_revenue(admin: User = Depends(current_admin), db: Session = Depends(ge
 @admin_router.patch("/settings")
 def update_commission(payload: CommissionUpdate, admin: User = Depends(current_admin), db: Session = Depends(get_db)) -> dict:
     row = settings_row(db)
-    # Materialize all currently paid transactions with the rate they already had
-    # before changing the setting. New paid transactions will use the new rate.
-    sync_commission_records(db, None, Decimal(row.commission_percent))
     row.commission_percent = payload.commission_percent
     db.commit()
     return {"commission_percent": float(row.commission_percent)}
 
 
 @manager_router.post("/commission-payouts")
-def pay_admin_commission(payload: CommissionPayoutRequest, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
-    settings = settings_row(db)
-    sync_commission_records(db, [manager.id], Decimal(settings.commission_percent))
-    commission_rows = db.query(PlatformCommission).filter(
-        PlatformCommission.manager_id == manager.id,
-        PlatformCommission.payout_id.is_(None),
-    ).with_for_update().all()
-    amount = sum((Decimal(row.commission_amount) for row in commission_rows), Decimal("0.00")).quantize(CENT)
-    if amount <= 0:
-        raise HTTPException(status_code=409, detail="There is no unpaid admin commission to transfer.")
-
-    if amount != payload.amount:
-        raise HTTPException(status_code=409, detail="The unpaid commission total changed. Refresh the page and confirm the updated amount.")
-
-    manager_wallet = db.query(WalletAccount).filter(WalletAccount.user_id == manager.id).with_for_update().first()
-
-    if manager_wallet is None or Decimal(manager_wallet.balance) < amount:
-        available = Decimal(manager_wallet.balance) if manager_wallet is not None else Decimal("0.00")
-        raise HTTPException(status_code=409, detail=f"Your wallet has {available:.2f}; {amount:.2f} is due to the admin.")
-
-    admin = db.query(User).filter(User.role == UserRole.ADMIN, User.is_active.is_(True)).order_by(User.created_at.asc()).first()
-
-    if admin is None:
-        raise HTTPException(status_code=409, detail="An active admin wallet is not available.")
-
-    admin_wallet = db.query(WalletAccount).filter(WalletAccount.user_id == admin.id).with_for_update().first()
-    if admin_wallet is None:
-        admin_wallet = WalletAccount(user_id=admin.id, balance=Decimal("0.00"))
-        db.add(admin_wallet)
-        db.flush()
-
-    payout = PlatformCommissionPayout(manager_id=manager.id, admin_id=admin.id, amount=amount)
-    db.add(payout)
-    db.flush()
-
-    for row in commission_rows:
-        row.payout_id = payout.id
-
-    manager_wallet.balance = Decimal(manager_wallet.balance) - amount
-    admin_wallet.balance = Decimal(admin_wallet.balance) + amount
-    
-    manager_transaction = WalletTransaction(user_id=manager.id, amount=-amount, transaction_type="DEBIT",
-        description="Admin commission payout", reference=f"admin-commission-payout:{payout.id}")
-    admin_transaction = WalletTransaction(user_id=admin.id, amount=amount, transaction_type="CREDIT",
-        description=f"Admin commission from {manager.name}", reference=f"admin-commission-payout:{payout.id}")
-
-    db.add(manager_transaction)
-    db.add(admin_transaction)
-    
-    notify_wallet_transaction(db, manager_transaction)
-    notify_wallet_transaction(db, admin_transaction)
-    db.commit()
-    return {"message": "Admin commission transferred.", "amount": float(amount),
-        "manager_balance": float(manager_wallet.balance), "admin_balance": float(admin_wallet.balance)}
+def pay_admin_commission(manager: User = Depends(current_manager)) -> dict:
+    raise HTTPException(status_code=410, detail="Commission is now transferred automatically.")
 
 
 @manager_router.get("")
