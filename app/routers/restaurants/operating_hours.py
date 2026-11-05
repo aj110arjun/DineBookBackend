@@ -1,4 +1,5 @@
 import uuid
+from typing import Annotated
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -386,11 +387,12 @@ def admin_schedule(restaurant_id: uuid.UUID, day: date | None = Query(default=No
 @admin_router.get("/{restaurant_id}/availability-inspection")
 def admin_availability_inspection(restaurant_id: uuid.UUID, reservation_date: date, start_time: time,
                                   number_of_guests: int = Query(default=2, ge=1, le=16),
-                                  admin: User = Depends(current_admin), db: Session = Depends(get_db)) -> dict:
+                                  admin: User = Depends(current_admin), db: Session = Depends(get_db),
+                                  duration_minutes: Annotated[int, Query(ge=30, le=720)] = 90) -> dict:
     restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
     if restaurant is None:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
-    end_time = (datetime.combine(reservation_date, start_time) + timedelta(minutes=90)).time()
+    end_time = (datetime.combine(reservation_date, start_time) + timedelta(minutes=duration_minutes)).time()
     periods, exception = effective_periods(db, restaurant_id, reservation_date)
     result = {"restaurant_id": str(restaurant_id), "date": reservation_date.isoformat(),
               "start_time": start_time.strftime("%H:%M"), "end_time": end_time.strftime("%H:%M"),
@@ -403,10 +405,10 @@ def admin_availability_inspection(restaurant_id: uuid.UUID, reservation_date: da
     if reservation_date <= restaurant_today():
         result["reason"] = "New reservations must be made at least one day in advance."
         return result
-    from app.routers.restaurants.reservations import suitable_table_groups, table_group_data
-    groups = suitable_table_groups(db, restaurant_id, reservation_date, start_time, number_of_guests)
+    from app.routers.restaurants.reservations import suitable_table_groups, floor_layout_data
+    groups = suitable_table_groups(db, restaurant_id, reservation_date, start_time, number_of_guests, duration_minutes=duration_minutes)
     result["available"] = bool(groups)
-    result["tables"] = [table_group_data(group) for group in groups]
+    result["tables"] = floor_layout_data(db, restaurant_id, reservation_date, start_time, duration_minutes)
     if not groups:
         result["reason"] = "No suitable table group is free for the requested duration and party size."
     return result

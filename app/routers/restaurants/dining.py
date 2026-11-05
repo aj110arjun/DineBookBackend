@@ -62,6 +62,8 @@ class TableCreate(BaseModel):
     floor_id: uuid.UUID
     table_number: str = Field(min_length=1, max_length=30)
     capacity: int = Field(gt=0, le=50)
+    grid_row: int = Field(ge=0, le=100)
+    grid_col: int = Field(ge=0, le=100)
     reservation_fee: Decimal = Field(default=Decimal("250.00"), ge=0, le=100000)
     table_type: DiningTableType = DiningTableType.ROUND
     status: str = Field(default="available", pattern="^(available|reserved|occupied|maintenance)$")
@@ -79,6 +81,8 @@ class TableUpdate(BaseModel):
     floor_id: uuid.UUID | None = None
     table_number: str | None = Field(default=None, min_length=1, max_length=30)
     capacity: int | None = Field(default=None, gt=0, le=50)
+    grid_row: int | None = Field(default=None, ge=0, le=100)
+    grid_col: int | None = Field(default=None, ge=0, le=100)
     reservation_fee: Decimal | None = Field(default=None, ge=0, le=100000)
     table_type: DiningTableType | None = None
     status: str | None = Field(default=None, pattern="^(available|reserved|occupied|maintenance|inactive)$")
@@ -123,6 +127,7 @@ def table_data(table: DiningTable) -> dict:
         "table_number": table.table_number, "capacity": table.capacity,
         "seats": table.capacity, "table_type": table.table_type.value, "status": table.status,
         "reservation_fee": float(table.reservation_fee or 0),
+        "grid_row": table.grid_row, "grid_col": table.grid_col,
     }
 
 
@@ -154,6 +159,8 @@ def duplicate_error(exc: IntegrityError) -> HTTPException:
     message = str(getattr(exc, "orig", exc)).lower()
     if "uq_floors_restaurant_number" in message:
         return HTTPException(status_code=409, detail="This floor number is already used in your restaurant.")
+    if "uq_dining_tables_grid_position" in message:
+        return HTTPException(status_code=409, detail="Another table already occupies this position on the selected floor.")
     if "uq_dining_tables_floor_number" in message or "unique" in message:
         return HTTPException(status_code=409, detail="This table number is already used on the selected floor.")
     return HTTPException(status_code=409, detail="The requested floor or table conflicts with existing data.")

@@ -2,8 +2,6 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import uuid
-from decimal import Decimal
-
 from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -38,7 +36,17 @@ class PlatformCommission(Base):
     commission_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
     commission_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    payout_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("platform_commission_payouts.id", ondelete="RESTRICT"), nullable=True, index=True)
+    payout_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("platform_commission_payouts.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+
+    refunded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
 
 class PlatformCommissionPayout(Base):

@@ -1,15 +1,16 @@
 import uuid
+from typing import Annotated
 import base64
 import hashlib
 import hmac
 import json
-from itertools import combinations
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
+from app import db
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import String, and_, cast, func, or_
@@ -33,7 +34,7 @@ from app.routers.auth.chef_auth import current_chef
 from app.routers.auth.manager_auth import current_manager
 from app.routers.restaurants.operating_hours import effective_periods
 from app.services.notifications import notify_wallet_transaction
-from app.services.table_availability import table_statuses, RESERVATION_DURATION
+from app.services.table_availability import table_statuses
 
 
 customer_router = APIRouter(prefix="/api/customer/reservations", tags=["reservations"])
@@ -83,9 +84,10 @@ class ReservationCreate(BaseModel):
     restaurant_id: uuid.UUID
     reservation_date: date
     start_time: time
+    duration_minutes: int = Field(default=90, ge=30, le=720)
     number_of_guests: int = Field(ge=1, le=16)
     table_id: uuid.UUID | None = None
-    table_ids: list[uuid.UUID] | None = Field(default=None, min_length=1, max_length=2)
+    table_ids: list[uuid.UUID] | None = Field(default=None, min_length=1)
     special_request: str | None = Field(default=None, max_length=1000)
     fulfillment_type: str = Field(default="TABLE_ONLY", pattern="^(TABLE_ONLY|PREORDER)$")
     payment_method: str = Field(default="WALLET", pattern="^(WALLET|RAZORPAY)$")
@@ -224,30 +226,62 @@ def within_operating_hours(db: Session, restaurant_id: uuid.UUID, day: date, sta
     return False
 
 
-def suitable_table_groups(db: Session, restaurant_id: uuid.UUID, day: date, start: time, guests: int, lock: bool = False) -> list[tuple[DiningTable, ...]]:
-    end = (datetime.combine(day, start) + RESERVATION_DURATION).time()
-    query = db.query(DiningTable).join(RestaurantFloor, DiningTable.floor_id == RestaurantFloor.id).filter(
-        DiningTable.restaurant_id == restaurant_id, DiningTable.status.in_(("available", "occupied", "reserved")),
-        RestaurantFloor.is_active.is_(True),
-    ).order_by(DiningTable.capacity, DiningTable.reservation_fee, DiningTable.table_number)
+def floor_table_positions(tables) -> dict:
+    active = [table for table in tables if table.status != "inactive"]
+    positioned = [table for table in active
+                  if table.grid_row is not None and table.grid_col is not None]
+    positions = {table.id: (table.grid_row, table.grid_col) for table in positioned}
+    first_row = max((table.grid_row for table in positioned), default=-1) + 1
+    unpositioned = sorted(
+        (table for table in active if table.id not in positions),
+        key=lambda table: (table.table_number, str(table.id)),
+    )
+    for index, table in enumerate(unpositioned):
+        positions[table.id] = (first_row + index // 4, index % 4)
+    return positions
+
+
+def suitable_table_groups(
+    db: Session,
+    restaurant_id: uuid.UUID,
+    day: date,
+    start: time,
+    guests: int,
+    lock: bool = False,
+    duration_minutes: int = 90,
+) -> list[tuple[DiningTable, ...]]:
+    end = (datetime.combine(day, start) + timedelta(minutes=duration_minutes)).time()
+
+    query = (
+        db.query(DiningTable)
+        .join(
+            RestaurantFloor,
+            DiningTable.floor_id == RestaurantFloor.id,
+        )
+        .filter(
+            DiningTable.restaurant_id == restaurant_id,
+            DiningTable.status.in_(("available", "occupied", "reserved")),
+            RestaurantFloor.is_active.is_(True),
+        )
+        .order_by(DiningTable.id)
+    )
+
     if lock:
-        query = query.with_for_update()
+        query = query.with_for_update(of=DiningTable)
+
     tables = query.all()
     statuses = table_statuses(db, tables, day, start, end)
-    candidates = [table for table in tables if statuses[table.id] == "available"]
-    groups = [
-        (table,)
-        for table in candidates
-        if table.capacity >= guests
-        ]
 
-    groups.extend(
-        pair
-        for pair in combinations(candidates, 2)
-        if pair[0].floor_id == pair[1].floor_id
-        and sum(table.capacity for table in pair) >= guests
-    )
-    return sorted(groups, key=lambda group: (len(group), sum(table.reservation_fee for table in group), sum(table.capacity for table in group)))
+    available_tables = [
+        table
+        for table in tables
+        if statuses[table.id] == "available"
+    ]
+
+    if sum(table.capacity for table in available_tables) < guests:
+        return []
+
+    return [(table,) for table in available_tables]
 
 
 def table_group_data(group: tuple[DiningTable, ...]) -> dict:
@@ -261,12 +295,57 @@ def table_group_data(group: tuple[DiningTable, ...]) -> dict:
         "capacity": sum(table.capacity for table in group),
         "table_type": " + ".join(table_types),
         "reservation_fee": float(sum((Decimal(table.reservation_fee) for table in group), Decimal("0.00"))),
+        "floor_id": str(group[0].floor_id),
     }
+
+def floor_layout_data(
+    db: Session,
+    restaurant_id: uuid.UUID,
+    day: date,
+    start: time,
+    duration_minutes: int = 90,
+) -> list[dict]:
+    end = (datetime.combine(day, start) + timedelta(minutes=duration_minutes)).time()
+
+    tables = (
+        db.query(DiningTable)
+        .join(
+            RestaurantFloor,
+            DiningTable.floor_id == RestaurantFloor.id,
+        )
+        .filter(
+            DiningTable.restaurant_id == restaurant_id,
+            RestaurantFloor.is_active.is_(True),
+            DiningTable.status != "inactive",
+        )
+        .order_by(
+            RestaurantFloor.floor_number,
+            DiningTable.grid_row,
+            DiningTable.grid_col,
+            DiningTable.table_number,
+        )
+        .all()
+    )
+
+    statuses = table_statuses(db, tables, day, start, end)
+    positions = {}
+    for table in tables:
+        if table.id not in positions:
+            positions.update(floor_table_positions(table.floor.tables))
+    return [
+        {**table_group_data((table,)), "grid_row": positions[table.id][0],
+         "grid_col": positions[table.id][1], "status": statuses[table.id],
+         "layout_source": "configured" if table.grid_row is not None
+             and table.grid_col is not None else "automatic"}
+        for table in tables
+    ]
+
 
 
 @customer_router.get("/availability")
 def availability(restaurant_id: uuid.UUID, reservation_date: date, start_time: time,
-                 number_of_guests: int = Query(ge=1, le=16), db: Session = Depends(get_db)) -> dict:
+                 number_of_guests: int = Query(ge=1, le=16), db: Session = Depends(get_db),
+                 duration_minutes: Annotated[int, Query(ge=30, le=720)] = 90) -> dict:
     try:
         ReservationCreate.local_booking_slot(start_time)
     except ValueError as exc:
@@ -274,7 +353,7 @@ def availability(restaurant_id: uuid.UUID, reservation_date: date, start_time: t
     restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id, Restaurant.status == RestaurantStatus.APPROVED).first()
     if restaurant is None:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
-    end = (datetime.combine(reservation_date, start_time) + RESERVATION_DURATION).time()
+    end = (datetime.combine(reservation_date, start_time) + timedelta(minutes=duration_minutes)).time()
     if reservation_date <= datetime.now(RESTAURANT_TIMEZONE).date():
         return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.isoformat(),
                 "start_time": start_time.strftime("%H:%M"), "end_time": end.strftime("%H:%M"),
@@ -283,16 +362,17 @@ def availability(restaurant_id: uuid.UUID, reservation_date: date, start_time: t
         return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.isoformat(),
                 "start_time": start_time.strftime("%H:%M"), "end_time": end.strftime("%H:%M"),
                 "available": False, "tables": [], "reason": "The restaurant is closed or this time is outside its operating hours."}
-    tables = suitable_table_groups(db, restaurant_id, reservation_date, start_time, number_of_guests)
+    tables = suitable_table_groups(db, restaurant_id, reservation_date, start_time, number_of_guests, duration_minutes=duration_minutes)
     return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.isoformat(),
             "start_time": start_time.strftime("%H:%M"), "end_time": end.strftime("%H:%M"),
-            "available": bool(tables), "tables": [table_group_data(group) for group in tables]}
+            "available": bool(tables), "tables": floor_layout_data(db, restaurant_id, reservation_date, start_time, duration_minutes)}
 
 
 @customer_router.get("/time-slots")
 def reservation_time_slots(restaurant_id: uuid.UUID, reservation_date: date,
                            number_of_guests: int = Query(ge=1, le=16),
-                           db: Session = Depends(get_db)) -> dict:
+                           db: Session = Depends(get_db),
+                           duration_minutes: Annotated[int, Query(ge=30, le=720)] = 90) -> dict:
     """Return bookable 30-minute start times for a date and party size."""
     restaurant = db.query(Restaurant).filter(
         Restaurant.id == restaurant_id, Restaurant.status == RestaurantStatus.APPROVED
@@ -311,7 +391,7 @@ def reservation_time_slots(restaurant_id: uuid.UUID, reservation_date: date,
             if closing <= opening:
                 closing += 24 * 60
             for start_minute in range(opening, closing, 30):
-                end_minute = start_minute + int(RESERVATION_DURATION.total_seconds() // 60)
+                end_minute = start_minute + duration_minutes
                 if end_minute > closing:
                     break
                 slot_day = reservation_date + timedelta(days=start_minute // (24 * 60))
@@ -319,9 +399,11 @@ def reservation_time_slots(restaurant_id: uuid.UUID, reservation_date: date,
                 start = time(minute_of_day // 60, minute_of_day % 60)
                 if slot_day <= now.date() or (slot_day == now.date() and start <= now.replace(tzinfo=None).time()):
                     continue
-                groups = suitable_table_groups(db, restaurant_id, reservation_date, start, number_of_guests)
-                slots.append({"time": start.strftime("%H:%M"), "available": bool(groups),
-                              "tables": [table_group_data(group) for group in groups]})
+                groups = suitable_table_groups(db, restaurant_id, reservation_date, start, number_of_guests, duration_minutes=duration_minutes)
+                slots.append({"time": start.strftime("%H:%M"),
+                              "end_time": (datetime.combine(reservation_date, start) + timedelta(minutes=duration_minutes)).strftime("%H:%M"),
+                              "duration_minutes": duration_minutes, "available": bool(groups),
+                              "tables": floor_layout_data(db, restaurant_id, reservation_date, start, duration_minutes)})
     return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.isoformat(), "slots": slots}
 
 
@@ -333,7 +415,7 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
     restaurant = db.query(Restaurant).filter(Restaurant.id == payload.restaurant_id, Restaurant.status == RestaurantStatus.APPROVED).first()
     if restaurant is None:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
-    end = (datetime.combine(payload.reservation_date, payload.start_time) + RESERVATION_DURATION).time()
+    end = (datetime.combine(payload.reservation_date, payload.start_time) + timedelta(minutes=payload.duration_minutes)).time()
     if not within_operating_hours(db, restaurant.id, payload.reservation_date, payload.start_time, end):
         raise HTTPException(status_code=409, detail="The restaurant is closed or this time is outside its operating hours.")
     if payload.fulfillment_type == "PREORDER" and not payload.preorder_items:
@@ -429,18 +511,67 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
     preorder_tax_amount = (preorder_taxable_total * preorder_tax_percent / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     preorder_total = (preorder_taxable_total + preorder_tax_amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     try:
-        requested_table_ids = payload.table_ids or ([payload.table_id] if payload.table_id else [])
-        if not requested_table_ids or len(set(requested_table_ids)) != len(requested_table_ids):
-            raise HTTPException(status_code=422, detail="Choose a valid table setup for your party size.")
-        table_groups = suitable_table_groups(db, restaurant.id, payload.reservation_date, payload.start_time, payload.number_of_guests, lock=True)
-        if not table_groups:
+        requested_table_ids = (
+            payload.table_ids
+            or ([payload.table_id] if payload.table_id else [])
+        )
+
+        if (
+            not requested_table_ids
+            or len(set(requested_table_ids)) != len(requested_table_ids)
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Select each table only once.",
+            )
+
+        available_groups = suitable_table_groups(
+            db,
+            restaurant.id,
+            payload.reservation_date,
+            payload.start_time,
+            1,  # Check selected capacity separately to return an accurate error.
+            lock=True,
+            duration_minutes=payload.duration_minutes,
+        )
+
+        available_by_id = {
+            table.id: table
+            for group in available_groups
+            for table in group
+        }
+
+        if any(table_id not in available_by_id for table_id in requested_table_ids):
             db.rollback()
-            raise HTTPException(status_code=409, detail="No suitable table is available for this time.")
-        selected_group = next((group for group in table_groups if {table.id for table in group} == set(requested_table_ids)), None)
-        if selected_group is None:
-            db.rollback()
-            raise HTTPException(status_code=409, detail="That table setup is no longer available. Search again to choose another option.")
-        fee_amount = sum((Decimal(table.reservation_fee) for table in selected_group), Decimal("0.00"))
+            raise HTTPException(
+                status_code=409,
+                detail="A selected table is no longer available. Choose again.",
+            )
+
+        selected_group = tuple(
+            available_by_id[table_id]
+            for table_id in requested_table_ids
+        )
+        selected_capacity = sum(
+            table.capacity for table in selected_group
+        )
+
+        if selected_capacity < payload.number_of_guests:
+            missing_seats = payload.number_of_guests - selected_capacity
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Select more tables to seat all "
+                    f"{payload.number_of_guests} guests. "
+                    f"{missing_seats} more seats needed."
+                ),
+            )
+
+        # Always calculate the charge on the server.
+        fee_amount = sum(
+            (Decimal(table.reservation_fee) for table in selected_group),
+            Decimal("0.00"),
+        )
         wallet_preorder_amount = preorder_total if preorder_method == "WALLET" else Decimal("0.00")
         wallet_debit_amount = wallet_preorder_amount + (fee_amount if payload.payment_method == "WALLET" else Decimal("0.00"))
         wallet_account = None
@@ -467,8 +598,6 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
             preorder_offer_code=preorder_offer.code if preorder_offer else None,
             fee_amount=fee_amount)
         db.add(item)
-        if wallet_account:
-            notify_wallet_transaction(db, WalletTransaction(user_id=customer.id, reservation_id=item.id, amount=-wallet_debit_amount))
         db.flush()
         checkout = None
         if payload.payment_method == "RAZORPAY":
@@ -490,8 +619,13 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
             description = f"Reservation at {restaurant.name}"
             if preorder_method == "WALLET":
                 description += " including preorder"
-            db.add(WalletTransaction(user_id=customer.id, reservation_id=item.id, amount=-wallet_debit_amount,
-                transaction_type="DEBIT", description=description))
+            transaction = WalletTransaction(
+                user_id=customer.id, reservation_id=item.id, amount=-wallet_debit_amount,
+                transaction_type="DEBIT", description=description,
+            )
+            db.add(transaction)
+            db.flush()
+            notify_wallet_transaction(db, transaction)
         if payload.payment_method == "WALLET":
             record_restaurant_payment(db, restaurant.id, fee_amount,
                 f"Reservation RES-{item.id.hex[:8].upper()} · DineBook wallet", f"customer-payment:reservation:{item.id}:fee")
@@ -699,8 +833,23 @@ def refund_wallet_reservation(db: Session, item: Reservation) -> Decimal:
         reference=f"reservation:{item.id}")
     db.add(wallet_transaction)
     notify_wallet_transaction(db, wallet_transaction)
-    reverse_restaurant_payment(db, item.restaurant_id, refund_amount,
-        f"Customer wallet refund · RES-{item.id.hex[:8].upper()}", f"customer-refund:reservation:{item.id}")
+    if fee_refundable:
+        reverse_restaurant_payment(
+            db,
+            item.restaurant_id,
+            Decimal(item.fee_amount),
+            f"Reservation fee refund · RES-{item.id.hex[:8].upper()}",
+            f"customer-refund:reservation:{item.id}:fee",
+        )
+
+    if preorder_refundable:
+        reverse_restaurant_payment(
+            db,
+            item.restaurant_id,
+            Decimal(item.preorder_total or 0),
+            f"Preorder refund · RES-{item.id.hex[:8].upper()}",
+            f"customer-refund:reservation:{item.id}:preorder",
+        )
     return refund_amount
 
 
@@ -989,13 +1138,34 @@ def manager_confirm_payment(reservation_id: uuid.UUID, manager: User = Depends(c
         raise HTTPException(status_code=409, detail="Only reservations awaiting payment can be confirmed.")
     previous_status = item.status
     # This is a manager attestation of payment received outside DineBook.
+
+
     item.payment_method = "PAY_AT_DESK"
     item.payment_status = "PAID"
     item.paid_at = datetime.now(timezone.utc)
+
+    record_restaurant_payment(
+        db,
+        item.restaurant_id,
+        Decimal(item.fee_amount),
+        f"Reservation RES-{item.id.hex[:8].upper()} · Desk",
+        f"customer-payment:reservation:{item.id}:fee",
+        credit_gross=False,
+    )
+
     if item.fulfillment_type == "PREORDER":
         item.preorder_payment_method = "PAY_AT_DESK"
         item.preorder_payment_status = "PAID"
         item.preorder_paid_at = item.paid_at
+
+        record_restaurant_payment(
+            db,
+            item.restaurant_id,
+            Decimal(item.preorder_total or 0),
+            f"Preorder RES-{item.id.hex[:8].upper()} · Desk",
+            f"customer-payment:reservation:{item.id}:preorder",
+            credit_gross=False,
+        )
     item.status = "CONFIRMED"
     record_reservation_event(db, item, previous_status, manager)
     db.commit()
@@ -1019,6 +1189,15 @@ def manager_confirm_preorder_payment(reservation_id: uuid.UUID, manager: User = 
         raise HTTPException(status_code=409, detail="Only an active reservation can have its preorder payment recorded.")
     item.preorder_payment_status = "PAID"
     item.preorder_paid_at = datetime.now(timezone.utc)
+
+    record_restaurant_payment(
+        db,
+        item.restaurant_id,
+        Decimal(item.preorder_total or 0),
+        f"Preorder RES-{item.id.hex[:8].upper()} · Desk",
+        f"customer-payment:reservation:{item.id}:preorder",
+        credit_gross=False,
+    )
     preorder_order = db.query(FoodOrder).filter(
         FoodOrder.reservation_id == item.id,
         FoodOrder.idempotency_key == uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(item.id)),

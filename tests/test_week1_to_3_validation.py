@@ -222,6 +222,8 @@ class DatabaseTests(unittest.TestCase):
         self.assertFalse(self.customer.must_change_password)
 
     def test_paid_order_retries_preserve_timestamp_and_table_until_completion(self):
+        self.db.add(User(name="Admin", email="payment-admin@example.com", password_hash="unused", role=UserRole.ADMIN))
+        self.db.add(WalletAccount(user_id=self.manager.id, balance=Decimal("100.00")))
         floor = RestaurantFloor(restaurant_id=self.restaurant.id, floor_number=1, floor_name="Main")
         self.db.add(floor); self.db.flush()
         table = DiningTable(restaurant_id=self.restaurant.id, floor_id=floor.id, table_number="1", capacity=2, status="occupied")

@@ -42,6 +42,7 @@ class DiningTable(Base):
     __tablename__ = "dining_tables"
     __table_args__ = (
         UniqueConstraint("floor_id", "table_number", name="uq_dining_tables_floor_number"),
+        UniqueConstraint("floor_id", "grid_row", "grid_col", name="uq_dining_tables_grid_position"),
         ForeignKeyConstraint(["floor_id", "restaurant_id"], ["restaurant_floors.id", "restaurant_floors.restaurant_id"], ondelete="RESTRICT", name="fk_dining_tables_floor_restaurant"),
     )
 
@@ -67,3 +68,5 @@ class DiningTable(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     floor: Mapped[RestaurantFloor] = relationship(back_populates="tables")
+    grid_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    grid_col: Mapped[int | None] = mapped_column(Integer, nullable=True)

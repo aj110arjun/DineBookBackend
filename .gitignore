@@ -14,3 +14,4 @@ tests/*
 !tests/__init__.py
 !tests/sqlite_support.py
 !tests/test_week1_to_3_validation.py
+!tests/test_auto_commission.py
