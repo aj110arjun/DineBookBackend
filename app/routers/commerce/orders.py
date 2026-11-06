@@ -187,8 +187,8 @@ class OfferInput(BaseModel):
     discount_percent: Decimal = Field(gt=0, le=1000000)
     minimum_subtotal: Decimal = Field(default=Decimal("0.00"), ge=0)
     max_uses: int | None = Field(default=None, gt=0)
-    starts_at: datetime | None = None
-    ends_at: datetime | None = None
+    starts_at: datetime 
+    ends_at: datetime
     timezone_name: str | None = Field(default=None, max_length=100)
     title: str = Field(default="Offer", min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=1000)
