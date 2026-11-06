@@ -27,6 +27,20 @@ class NearbyRestaurantSearch(BaseModel):
     page_size: int = Field(default=6, ge=1, le=100)
 
 
+@router.get("/{restaurant_id}/preorder-menu")
+def get_customer_preorder_menu(
+    restaurant_id: uuid.UUID, db: Session = Depends(get_db),
+    page: int = Query(1, ge=1), page_size: int = Query(8, ge=1, le=100),
+    search: str = Query("", max_length=100), category_id: uuid.UUID | None = None,
+    is_vegetarian: bool | None = None,
+    sort: str = Query("name", pattern="^(name|name-desc|price-low|price-high)$"),
+):
+    """Browse orderable foods across all categories, filtered before pagination."""
+    return menu_page(db, restaurant_id, page=page, page_size=page_size,
+                     search=search, category_id=category_id, is_vegetarian=is_vegetarian,
+                     sort=sort, public=True, preorder=True)
+
+
 @router.get("/{restaurant_id}/menu")
 def get_customer_restaurant_menu(restaurant_id: uuid.UUID, db: Session = Depends(get_db),
     page: int | None = Query(None, ge=1), page_size: int = Query(8, ge=1, le=100),
