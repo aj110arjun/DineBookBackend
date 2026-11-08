@@ -60,6 +60,12 @@ def record_order_event(db: Session, order: FoodOrder, previous_status: str | Non
     notify_order_status(db, order, previous_status)
 
 
+def send_placed_order_to_kitchen(db: Session, order: FoodOrder, actor: User) -> None:
+    order.status = "ACCEPTED"
+    order.accepted_at = datetime.now(timezone.utc)
+    record_order_event(db, order, "PLACED", actor)
+
+
 def reverse_offer_redemption(db: Session, order: FoodOrder) -> None:
     redemption = db.query(OfferRedemption).filter(OfferRedemption.order_id == order.id, OfferRedemption.status == "APPLIED").with_for_update().first()
     if redemption is None:
@@ -255,6 +261,15 @@ def staff_restaurant(staff: User, db: Session) -> Restaurant:
     return restaurant
 
 
+def can_customer_cancel_order(order: FoodOrder) -> bool:
+    return order.status == "PLACED" or (
+        order.status == "ACCEPTED"
+        and order.reservation_id is not None
+        and order.idempotency_key != uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(order.reservation_id))
+        and (order.payment_method != "PAY_AT_DESK" or order.payment_status != "PAID")
+    )
+
+
 def serialize(order: FoodOrder, db: Session) -> dict:
     restaurant = db.query(Restaurant).filter(Restaurant.id == order.restaurant_id).first()
     customer = db.query(User).filter(User.id == order.customer_id).first() if order.customer_id else None
@@ -270,7 +285,7 @@ def serialize(order: FoodOrder, db: Session) -> dict:
     is_preorder = order.idempotency_key == uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(order.reservation_id)) if order.reservation_id else False
     return {
         "id": str(order.id), "reservation_id": str(order.reservation_id) if order.reservation_id else None,
-        "is_preorder": is_preorder,
+        "is_preorder": is_preorder, "can_customer_cancel": can_customer_cancel_order(order),
         "order_source": "PREORDER" if is_preorder else ("RESERVATION" if order.reservation_id else "SPOT" if order.table_id else "WALK_IN"),
         "reservation": ({"id": str(reservation.id), "status": reservation.status,
             "reservation_date": reservation.reservation_date.isoformat(),
@@ -321,10 +336,13 @@ def create_reserved_order(reservation_id: uuid.UUID, payload: CheckoutInput, cus
             raise HTTPException(status_code=400, detail="The order restaurant must match the reservation restaurant.")
 
         previous = db.query(FoodOrder).filter(FoodOrder.customer_id == customer.id,
-            FoodOrder.idempotency_key == payload.idempotency_key).first()
+            FoodOrder.idempotency_key == payload.idempotency_key).with_for_update().first()
         if previous is not None:
             if previous.reservation_id != reservation.id:
                 raise HTTPException(status_code=409, detail="This checkout key was already used for another reservation.")
+            if previous.status == "PLACED":
+                send_placed_order_to_kitchen(db, previous, actor or customer)
+                db.commit()
             return serialize(previous, db)
 
         restaurant = db.query(Restaurant).filter(
@@ -402,7 +420,8 @@ def create_reserved_order(reservation_id: uuid.UUID, payload: CheckoutInput, cus
             restaurant_id=reservation.restaurant_id, idempotency_key=payload.idempotency_key,
             offer_id=offer.id if offer else None, offer_code=code, items=snapshots,
             subtotal=subtotal, discount_amount=discount, tax_percent=tax_percent,
-            tax_amount=tax_amount, total=total, status="PLACED",
+            tax_amount=tax_amount, total=total, status="ACCEPTED",
+            accepted_at=datetime.now(timezone.utc),
             payment_method=payload.payment_method, payment_status=payment_status,
             paid_at=datetime.now(timezone.utc) if payment_status == "PAID" else None,
             customer_note=payload.customer_note)
@@ -504,6 +523,98 @@ def manager_create_reservation_order(reservation_id: uuid.UUID, payload: Checkou
     return create_reserved_order(reservation.id, desk_payload, customer, db, actor=manager)
 
 
+def queue_reservation_preorder(db: Session, reservation: Reservation, manager: User) -> FoodOrder:
+    """Queue the saved preorder in the transaction that locks its reservation."""
+    if reservation.status != "SEATED":
+        raise HTTPException(status_code=409, detail="A preorder can be sent to the kitchen only while the reservation is seated.")
+    if reservation.fulfillment_type != "PREORDER" or not reservation.preorder_items:
+        raise HTTPException(status_code=409, detail="This reservation does not have a preorder.")
+
+    customer = db.query(User).filter(User.id == reservation.user_id).first()
+    if customer is None:
+        raise HTTPException(status_code=409, detail="The reservation customer is unavailable.")
+    idempotency_key = uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(reservation.id))
+    existing = db.query(FoodOrder).filter(
+        FoodOrder.customer_id == customer.id,
+        FoodOrder.idempotency_key == idempotency_key,
+    ).with_for_update().first()
+    if existing is not None:
+        if existing.reservation_id != reservation.id:
+            raise HTTPException(status_code=409, detail="The preorder order key is already associated with another reservation.")
+        if existing.status == "PLACED":
+            send_placed_order_to_kitchen(db, existing, manager)
+        return existing
+
+    # The reservation snapshot is authoritative: it was priced and, when
+    # selected, paid during reservation checkout. Do not reprice or charge it.
+    snapshots = []
+    subtotal = Decimal("0.00")
+    for entry in reservation.preorder_items:
+        try:
+            quantity = int(entry["quantity"])
+            unit_price = Decimal(str(entry["unit_price"])).quantize(CENT, rounding=ROUND_HALF_UP)
+            line_total = Decimal(str(entry["line_total"])).quantize(CENT, rounding=ROUND_HALF_UP)
+            variant_id = uuid.UUID(str(entry["variant_id"]))
+            food_name = str(entry["food_name"])
+            variant_name = str(entry["variant_name"])
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            raise HTTPException(status_code=409, detail="The saved preorder details are invalid and cannot be sent to the kitchen.")
+        expected_total = (unit_price * quantity).quantize(CENT, rounding=ROUND_HALF_UP)
+        if quantity < 1 or quantity > 99 or line_total != expected_total:
+            raise HTTPException(status_code=409, detail="The saved preorder totals are inconsistent.")
+        subtotal += line_total
+        snapshots.append({"variant_id": str(variant_id), "food_name": food_name,
+            "description": entry.get("description"),
+            "image_url": entry.get("image_url"),
+            "variant_name": variant_name, "quantity": quantity,
+            "unit_price": float(unit_price), "line_total": float(line_total)})
+    subtotal = subtotal.quantize(CENT, rounding=ROUND_HALF_UP)
+    preorder_discount = Decimal(reservation.preorder_discount or 0).quantize(CENT, rounding=ROUND_HALF_UP)
+    preorder_tax = Decimal(reservation.preorder_tax_amount or 0).quantize(CENT, rounding=ROUND_HALF_UP)
+    if subtotal != (Decimal(reservation.preorder_total).quantize(CENT, rounding=ROUND_HALF_UP) - preorder_tax + preorder_discount):
+        raise HTTPException(status_code=409, detail="The saved preorder total is inconsistent.")
+
+    payment_method = reservation.preorder_payment_method
+    payment_status = reservation.preorder_payment_status
+    if payment_status is None:  # legacy reservation records
+        legacy_paid = reservation.payment_method == "WALLET" and reservation.payment_status == "PAID"
+        payment_method = "WALLET" if legacy_paid else "PAY_AT_DESK"
+        payment_status = "PAID" if legacy_paid else "PENDING"
+    if payment_status == "REFUNDED":
+        raise HTTPException(status_code=409, detail="The preorder was refunded and cannot be sent to the kitchen.")
+    if payment_status != "PAID":
+        payment_method = "PAY_AT_DESK"
+
+    preorder_offer = db.query(FoodOrderOffer).filter(FoodOrderOffer.id == reservation.preorder_offer_id).first() if reservation.preorder_offer_id else None
+    order = FoodOrder(
+        customer_id=customer.id,
+        reservation_id=reservation.id,
+        restaurant_id=reservation.restaurant_id,
+        idempotency_key=idempotency_key,
+        items=snapshots,
+        subtotal=subtotal,
+        offer_id=preorder_offer.id if preorder_offer else None,
+        offer_code=reservation.preorder_offer_code,
+        discount_amount=preorder_discount,
+        tax_percent=Decimal(reservation.preorder_tax_percent or 0),
+        tax_amount=preorder_tax,
+        total=Decimal(reservation.preorder_total).quantize(CENT, rounding=ROUND_HALF_UP),
+        status="ACCEPTED",
+        accepted_at=datetime.now(timezone.utc),
+        payment_method=payment_method or "PAY_AT_DESK",
+        payment_status=payment_status,
+        paid_at=datetime.now(timezone.utc) if payment_status == "PAID" else None,
+        customer_note="Reservation preorder",
+    )
+    db.add(order)
+    db.flush()
+    if preorder_offer is not None and preorder_discount > 0:
+        db.add(OfferRedemption(offer_id=preorder_offer.id, order_id=order.id, customer_id=customer.id,
+            discount_amount=preorder_discount, status="APPLIED"))
+    record_order_event(db, order, actor=manager)
+    return order
+
+
 @manager_reservation_orders_router.post("/{reservation_id}/preorder-order")
 def manager_queue_reservation_preorder(reservation_id: uuid.UUID,
                                        manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
@@ -515,91 +626,7 @@ def manager_queue_reservation_preorder(reservation_id: uuid.UUID,
         ).with_for_update().first()
         if reservation is None:
             raise HTTPException(status_code=404, detail="Reservation not found for this restaurant.")
-        if reservation.status != "SEATED":
-            raise HTTPException(status_code=409, detail="A preorder can be sent to the kitchen only while the reservation is seated.")
-        if reservation.fulfillment_type != "PREORDER" or not reservation.preorder_items:
-            raise HTTPException(status_code=409, detail="This reservation does not have a preorder.")
-
-        customer = db.query(User).filter(User.id == reservation.user_id).first()
-        if customer is None:
-            raise HTTPException(status_code=409, detail="The reservation customer is unavailable.")
-        idempotency_key = uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(reservation.id))
-        existing = db.query(FoodOrder).filter(
-            FoodOrder.customer_id == customer.id,
-            FoodOrder.idempotency_key == idempotency_key,
-        ).with_for_update().first()
-        if existing is not None:
-            if existing.reservation_id != reservation.id:
-                raise HTTPException(status_code=409, detail="The preorder order key is already associated with another reservation.")
-            db.commit()
-            return serialize(existing, db)
-
-        # The reservation snapshot is authoritative: it was priced and, when
-        # selected, paid during reservation checkout. Do not reprice or charge it.
-        snapshots = []
-        subtotal = Decimal("0.00")
-        for entry in reservation.preorder_items:
-            try:
-                quantity = int(entry["quantity"])
-                unit_price = Decimal(str(entry["unit_price"])).quantize(CENT, rounding=ROUND_HALF_UP)
-                line_total = Decimal(str(entry["line_total"])).quantize(CENT, rounding=ROUND_HALF_UP)
-                variant_id = uuid.UUID(str(entry["variant_id"]))
-                food_name = str(entry["food_name"])
-                variant_name = str(entry["variant_name"])
-            except (KeyError, TypeError, ValueError, ArithmeticError):
-                raise HTTPException(status_code=409, detail="The saved preorder details are invalid and cannot be sent to the kitchen.")
-            expected_total = (unit_price * quantity).quantize(CENT, rounding=ROUND_HALF_UP)
-            if quantity < 1 or quantity > 99 or line_total != expected_total:
-                raise HTTPException(status_code=409, detail="The saved preorder totals are inconsistent.")
-            subtotal += line_total
-            snapshots.append({"variant_id": str(variant_id), "food_name": food_name,
-                "description": entry.get("description"),
-                "image_url": entry.get("image_url"),
-                "variant_name": variant_name, "quantity": quantity,
-                "unit_price": float(unit_price), "line_total": float(line_total)})
-        subtotal = subtotal.quantize(CENT, rounding=ROUND_HALF_UP)
-        preorder_discount = Decimal(reservation.preorder_discount or 0).quantize(CENT, rounding=ROUND_HALF_UP)
-        preorder_tax = Decimal(reservation.preorder_tax_amount or 0).quantize(CENT, rounding=ROUND_HALF_UP)
-        if subtotal != (Decimal(reservation.preorder_total).quantize(CENT, rounding=ROUND_HALF_UP) - preorder_tax + preorder_discount):
-            raise HTTPException(status_code=409, detail="The saved preorder total is inconsistent.")
-
-        payment_method = reservation.preorder_payment_method
-        payment_status = reservation.preorder_payment_status
-        if payment_status is None:  # legacy reservation records
-            legacy_paid = reservation.payment_method == "WALLET" and reservation.payment_status == "PAID"
-            payment_method = "WALLET" if legacy_paid else "PAY_AT_DESK"
-            payment_status = "PAID" if legacy_paid else "PENDING"
-        if payment_status == "REFUNDED":
-            raise HTTPException(status_code=409, detail="The preorder was refunded and cannot be sent to the kitchen.")
-        if payment_status != "PAID":
-            payment_method = "PAY_AT_DESK"
-
-        preorder_offer = db.query(FoodOrderOffer).filter(FoodOrderOffer.id == reservation.preorder_offer_id).first() if reservation.preorder_offer_id else None
-        order = FoodOrder(
-            customer_id=customer.id,
-            reservation_id=reservation.id,
-            restaurant_id=restaurant.id,
-            idempotency_key=idempotency_key,
-            items=snapshots,
-            subtotal=subtotal,
-            offer_id=preorder_offer.id if preorder_offer else None,
-            offer_code=reservation.preorder_offer_code,
-            discount_amount=preorder_discount,
-            tax_percent=Decimal(reservation.preorder_tax_percent or 0),
-            tax_amount=preorder_tax,
-            total=Decimal(reservation.preorder_total).quantize(CENT, rounding=ROUND_HALF_UP),
-            status="PLACED",
-            payment_method=payment_method or "PAY_AT_DESK",
-            payment_status=payment_status,
-            paid_at=datetime.now(timezone.utc) if payment_status == "PAID" else None,
-            customer_note="Reservation preorder",
-        )
-        db.add(order)
-        db.flush()
-        if preorder_offer is not None and preorder_discount > 0:
-            db.add(OfferRedemption(offer_id=preorder_offer.id, order_id=order.id, customer_id=customer.id,
-                discount_amount=preorder_discount, status="APPLIED"))
-        record_order_event(db, order, actor=manager)
+        order = queue_reservation_preorder(db, reservation, manager)
         db.commit()
         db.refresh(order)
         return serialize(order, db)
@@ -695,8 +722,8 @@ def cancel_customer_order(order_id: uuid.UUID, payload: CustomerOrderCancellatio
     row = db.query(FoodOrder).filter(FoodOrder.id == order_id, FoodOrder.customer_id == customer.id).with_for_update().first()
     if row is None:
         raise HTTPException(status_code=404, detail="Order not found.")
-    if row.status != "PLACED":
-        raise HTTPException(status_code=409, detail="Only newly placed orders can be cancelled by the customer.")
+    if not can_customer_cancel_order(row):
+        raise HTTPException(status_code=409, detail="This order can no longer be cancelled by the customer.")
     if row.payment_status == "PAID":
         account = db.query(WalletAccount).filter(WalletAccount.user_id == customer.id).with_for_update().first()
         if account is None:

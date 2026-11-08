@@ -20,7 +20,8 @@ from app.models.user import User, UserRole
 from app.routers.commerce.orders import calculate_offer_discount, offer_data
 from app.core.config import settings
 from app.routers.commerce.orders import (CheckoutInput, CustomerOrderCancellation, OrderLineInput,
-    cancel_customer_order, create_reserved_order, validate_customer_offer, preview_customer_offer,
+    cancel_customer_order, create_reserved_order, manager_create_reservation_order,
+    validate_customer_offer, preview_customer_offer,
     OfferValidationInput, OfferPreviewInput, customer_router)
 
 
@@ -84,9 +85,20 @@ class OfferCheckoutTests(unittest.TestCase):
             applicability="ITEMS", eligible_food_ids=[str(self.food.id)], max_uses=1, per_customer_limit=1)
         self.db.add(offer); self.db.commit()
         order = create_reserved_order(self.reservation.id, self.payload("item50"), self.customer, self.db)
+        self.assertEqual(order["status"], "ACCEPTED")
+        self.assertIsNotNone(order["accepted_at"])
         self.assertEqual((order["subtotal"], order["discount_amount"], order["total"]), (550.0, 50.0, 590.0))
         self.assertEqual((order["tax_percent"], order["tax_amount"]), (18.0, 90.0))
         self.assertEqual(self.db.query(OfferRedemption).one().discount_amount, Decimal("50.00"))
+
+    def test_desk_order_for_seated_reservation_goes_straight_to_kitchen(self):
+        manager = self.db.get(User, self.restaurant.manager_id)
+        payload = self.payload(None)
+        order = manager_create_reservation_order(self.reservation.id, payload, manager, self.db)
+        self.assertEqual((order["status"], order["payment_status"]), ("ACCEPTED", "PENDING"))
+        self.assertIsNotNone(order["accepted_at"])
+        retry = manager_create_reservation_order(self.reservation.id, payload, manager, self.db)
+        self.assertEqual(retry["id"], order["id"])
 
     def test_redemption_limit_is_released_after_cancellation(self):
         offer = FoodOrderOffer(restaurant_id=self.restaurant.id, code="SAVE50", title="Half price",

@@ -29,6 +29,7 @@ from app.models.realtime import RealtimeEvent
 from app.services.notifications import create_notification, notify_reservation_status
 from app.services.reservation_email import send_reservation_confirmation, send_reservation_confirmation_in_background
 from app.services.restaurant_wallet import record_restaurant_payment, reverse_restaurant_payment
+from app.routers.commerce.orders import queue_reservation_preorder, send_placed_order_to_kitchen
 from app.routers.auth.customer_auth import current_customer
 from app.routers.auth.chef_auth import current_chef
 from app.routers.auth.manager_auth import current_manager
@@ -221,7 +222,7 @@ def within_operating_hours(db: Session, restaurant_id: uuid.UUID, day: date, sta
         closing = closes.hour * 60 + closes.minute
         if closing <= opening:
             closing += 24 * 60
-        if opening <= starts and ends <= closing and (starts - opening) % 30 == 0:
+        if opening <= starts and ends <= closing:
             return True
     return False
 
@@ -408,7 +409,12 @@ def reservation_time_slots(restaurant_id: uuid.UUID, reservation_date: date,
 
 
 @customer_router.post("", status_code=status.HTTP_201_CREATED)
-def create_reservation(payload: ReservationCreate, customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> dict:
+def create_reservation(
+    payload: ReservationCreate,
+    background_tasks: BackgroundTasks,
+    customer: User = Depends(current_customer),
+    db: Session = Depends(get_db),
+) -> dict:
     now = datetime.now(RESTAURANT_TIMEZONE)
     if payload.reservation_date <= now.date():
         raise HTTPException(status_code=422, detail="Reservations must be made at least one day in advance.")
@@ -635,8 +641,10 @@ def create_reservation(payload: ReservationCreate, customer: User = Depends(curr
         db.commit()
         db.refresh(item)
         if item.status == "CONFIRMED" and item.payment_status == "PAID":
-            send_reservation_confirmation(db, item.id)
-            db.refresh(item)
+            background_tasks.add_task(
+                send_reservation_confirmation_in_background,
+                item.id,
+            )
         result = reservation_data(item, db)
         if checkout:
             result["payment_checkout"] = checkout
@@ -1062,7 +1070,8 @@ def manager_update_reservation_status(reservation_id: uuid.UUID, payload: Manage
     if item is None:
         raise HTTPException(status_code=404, detail="Reservation not found for this restaurant.")
     transitions = {"PENDING_PAYMENT": {"REJECTED"}, "CONFIRMED": {"SEATED", "NO_SHOW"}, "SEATED": {"COMPLETED"}}
-    if payload.status not in transitions.get(item.status, set()):
+    already_seated = item.status == payload.status == "SEATED"
+    if not already_seated and payload.status not in transitions.get(item.status, set()):
         raise HTTPException(status_code=409, detail=f"Reservation cannot move from {item.status} to {payload.status}.")
     if payload.status == "COMPLETED":
         pending_orders = db.query(FoodOrder.id).filter(
@@ -1076,12 +1085,28 @@ def manager_update_reservation_status(reservation_id: uuid.UUID, payload: Manage
     refund_amount = refund_wallet_reservation(db, item) if payload.status == "REJECTED" else Decimal("0.00")
     item.status = payload.status
     if payload.status == "SEATED":
-        item.checked_in_at = datetime.now(timezone.utc)
+        if not already_seated:
+            item.checked_in_at = datetime.now(timezone.utc)
+        try:
+            placed_orders = db.query(FoodOrder).filter(
+                FoodOrder.reservation_id == item.id,
+                FoodOrder.restaurant_id == item.restaurant_id,
+                FoodOrder.status == "PLACED",
+            ).with_for_update().all()
+            for order in placed_orders:
+                send_placed_order_to_kitchen(db, order, manager)
+            if (item.fulfillment_type == "PREORDER" and item.preorder_items
+                    and item.preorder_payment_status not in {"REFUNDED", "CANCELLED"}):
+                queue_reservation_preorder(db, item, manager)
+        except Exception:
+            db.rollback()
+            raise
     if payload.status == "COMPLETED":
         item.completed_at = datetime.now(timezone.utc)
     if payload.status in {"NO_SHOW", "REJECTED"}:
         item.status_reason = payload.reason
-    record_reservation_event(db, item, previous_status, manager, payload.reason)
+    if not already_seated:
+        record_reservation_event(db, item, previous_status, manager, payload.reason)
     db.commit()
     db.refresh(item)
     result = reservation_data(item, db)
