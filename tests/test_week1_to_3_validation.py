@@ -28,7 +28,7 @@ from app.models.reservation import Reservation
 from app.models.revenue import PlatformCommission
 from app.models.user import AccountStatus, User, UserRole
 from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction
-from app.models.realtime import WebhookReceipt
+from app.models.realtime import RealtimeEvent, WebhookReceipt
 from app.routers.auth.admin_auth import current_admin
 from app.routers.auth.chef_auth import current_chef, ChefChangePasswordRequest, change_chef_password
 from app.routers.auth.customer_auth import (current_customer, CustomerPasswordChangeRequest,
@@ -37,7 +37,8 @@ from app.routers.auth.manager_auth import current_manager
 from app.routers.restaurants.dining import FloorUpdate, TableUpdate
 from app.routers.manager.manager_menu import VariantPayload
 from app.routers.restaurants.operating_hours import Period
-from app.routers.commerce.orders import OfferInput, manager_mark_order_paid, update_status, MANAGER_TRANSITIONS
+from app.routers.commerce.orders import (OfferInput, StatusInput, chef_update_order,
+    manager_mark_order_paid, manager_queue_reservation_preorder, update_status, MANAGER_TRANSITIONS)
 from app.routers.restaurants.reservations import (ReservationCreate, within_operating_hours,
     manager_update_reservation_status, ManagerReservationStatus)
 from app.routers.commerce.revenue import gross_revenue, sync_commission_records
@@ -252,12 +253,34 @@ class DatabaseTests(unittest.TestCase):
 
     def test_preorder_revenue_and_commission_survive_kitchen_order_creation(self):
         reservation = self.paid_reservation()
+        reservation.status = "CONFIRMED"
+        reservation.preorder_items = [{
+            "variant_id": str(uuid.uuid4()), "food_name": "Pasta", "variant_name": "Regular",
+            "quantity": 1, "unit_price": 100, "line_total": 100,
+        }]
+        self.db.commit()
         self.assertEqual(gross_revenue(self.db, [self.manager.id], "month"), Decimal("150.00"))
-        order = FoodOrder(customer_id=self.customer.id, restaurant_id=self.restaurant.id,
-            reservation_id=reservation.id, idempotency_key=uuid.uuid5(
-                uuid.UUID("89dd0385-bbad-4aeb-b600-bf4377641e10"), str(reservation.id)),
-            items=[], subtotal=100, total=100, payment_status="PAID", payment_method="WALLET")
-        self.db.add(order); self.db.commit()
+        status = ManagerReservationStatus(status="SEATED")
+        seated = manager_update_reservation_status(reservation.id, status, self.manager, self.db)
+        order = self.db.query(FoodOrder).one()
+        self.assertEqual(seated["status"], "SEATED")
+        self.assertEqual(seated["food_orders"][0]["id"], str(order.id))
+        self.assertEqual((order.status, order.payment_status), ("ACCEPTED", "PAID"))
+        self.assertIsNotNone(order.accepted_at)
+        self.assertEqual(self.db.query(WalletTransaction).count(), 0)
+
+        retry = manager_update_reservation_status(reservation.id, status, self.manager, self.db)
+        self.assertEqual(retry["checked_in_at"], seated["checked_in_at"])
+        self.assertEqual(self.db.query(FoodOrder).count(), 1)
+        self.assertEqual(self.db.query(RealtimeEvent).filter_by(event_type="order.status_changed").count(), 1)
+        self.assertEqual(manager_queue_reservation_preorder(reservation.id, self.manager, self.db)["id"], str(order.id))
+
+        chef = User(name="Chef", email="kitchen@example.com", password_hash="unused",
+                    role=UserRole.CHEF, manager_id=self.manager.id)
+        self.db.add(chef)
+        self.db.commit()
+        preparing = chef_update_order(order.id, StatusInput(status="PREPARING"), chef, self.db)
+        self.assertEqual(preparing["status"], "PREPARING")
         self.assertEqual(gross_revenue(self.db, [self.manager.id], "month"), Decimal("150.00"))
         sync_commission_records(self.db, [self.manager.id], Decimal("10.00"))
         self.db.commit()
@@ -266,6 +289,53 @@ class DatabaseTests(unittest.TestCase):
         records = self.db.query(PlatformCommission).all()
         self.assertEqual(len(records), 2)
         self.assertEqual(sum(row.commission_amount for row in records), Decimal("15.00"))
+
+    def test_table_only_seating_sends_waiting_orders_without_creating_food(self):
+        reservation = self.paid_reservation()
+        reservation.status = "CONFIRMED"
+        reservation.fulfillment_type = "TABLE_ONLY"
+        self.db.commit()
+        status = ManagerReservationStatus(status="SEATED")
+        seated = manager_update_reservation_status(reservation.id, status, self.manager, self.db)
+        self.assertEqual(seated["food_orders"], [])
+
+        # Reservations seated before this flow changed may have a waiting order.
+        order = FoodOrder(customer_id=self.customer.id, restaurant_id=self.restaurant.id,
+            reservation_id=reservation.id, items=[], subtotal=100, total=100,
+            status="PLACED", payment_method="PAY_AT_DESK", payment_status="PENDING")
+        self.db.add(order)
+        self.db.commit()
+        manager_update_reservation_status(reservation.id, status, self.manager, self.db)
+        self.assertEqual(self.db.query(FoodOrder).count(), 1)
+        self.assertEqual((order.status, order.payment_status), ("ACCEPTED", "PENDING"))
+
+    def test_seating_keeps_desk_preorder_unpaid_and_rolls_back_invalid_handoff(self):
+        reservation = self.paid_reservation()
+        reservation.status = "CONFIRMED"
+        reservation.preorder_payment_method = "PAY_AT_DESK"
+        reservation.preorder_payment_status = "PENDING"
+        reservation.preorder_paid_at = None
+        reservation.preorder_items = [{
+            "variant_id": str(uuid.uuid4()), "food_name": "Pasta", "variant_name": "Regular",
+            "quantity": 1, "unit_price": 100, "line_total": 90,
+        }]
+        self.db.commit()
+        status = ManagerReservationStatus(status="SEATED")
+        with self.db.no_autoflush, self.assertRaises(HTTPException) as caught:
+            manager_update_reservation_status(reservation.id, status, self.manager, self.db)
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(reservation.status, "CONFIRMED")
+        self.assertIsNone(reservation.checked_in_at)
+        self.assertEqual(self.db.query(FoodOrder).count(), 0)
+
+        reservation.preorder_items = [{**reservation.preorder_items[0], "line_total": 100}]
+        self.db.commit()
+        with self.db.no_autoflush:
+            manager_update_reservation_status(reservation.id, status, self.manager, self.db)
+        order = self.db.query(FoodOrder).one()
+        self.assertEqual((order.status, order.payment_status), ("ACCEPTED", "PENDING"))
+        self.assertEqual(order.payment_method, "PAY_AT_DESK")
+        self.assertIsNone(order.paid_at)
 
     def test_cancelled_orders_do_not_block_reservation_completion(self):
         reservation = self.paid_reservation()
