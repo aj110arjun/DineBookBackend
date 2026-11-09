@@ -528,9 +528,6 @@ def verify_topup(payload: WalletTopUpVerification, customer: User = Depends(curr
     notify_wallet_transaction(db, transaction)
     db.add(RealtimeEvent(user_id=customer.id, event_type="payment.status_changed",
         resource_id=str(topup.id), data={"status": "PAID", "resource_type": "wallet_topup"}))
-    create_notification(db, customer, notification_type="wallet.topup.success", category="PAYMENT",
-        title="Wallet topped up", message="Your wallet top-up was successful.", entity_type="wallet_topup",
-        entity_id=topup.id, action_url="/customer/profile/wallet", dedupe_key=f"wallet-topup:{topup.id}:paid")
     db.commit()
     db.refresh(account)
     return {"message": "Wallet top-up successful.", "balance": float(account.balance)}

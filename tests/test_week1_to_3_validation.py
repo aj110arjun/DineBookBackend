@@ -29,6 +29,7 @@ from app.models.revenue import PlatformCommission
 from app.models.user import AccountStatus, User, UserRole
 from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction
 from app.models.realtime import RealtimeEvent, WebhookReceipt
+from app.models.notifications import Notification
 from app.routers.auth.admin_auth import current_admin
 from app.routers.auth.chef_auth import current_chef, ChefChangePasswordRequest, change_chef_password
 from app.routers.auth.customer_auth import (current_customer, CustomerPasswordChangeRequest,
@@ -43,6 +44,7 @@ from app.routers.restaurants.reservations import (ReservationCreate, within_oper
     manager_update_reservation_status, ManagerReservationStatus)
 from app.routers.commerce.revenue import gross_revenue, sync_commission_records
 from app.routers.commerce.webhooks import router as webhook_router
+from app.routers.commerce.wallet import WalletTopUpVerification, verify_topup
 from app.services.notifications import _safe_action_url
 
 
@@ -346,6 +348,53 @@ class DatabaseTests(unittest.TestCase):
         result = manager_update_reservation_status(reservation.id,
             ManagerReservationStatus(status="COMPLETED"), self.manager, self.db)
         self.assertEqual(result["status"], "COMPLETED")
+
+    def test_wallet_topup_emits_one_notification_in_either_callback_order(self):
+        client = self.client_for(webhook_router)
+        for index, webhook_first in enumerate((False, True), start=1):
+            with self.subTest(webhook_first=webhook_first):
+                order_id = f"order_topup_{index}"
+                payment_id = f"pay_topup_{index}"
+                topup = WalletTopUp(user_id=self.customer.id, razorpay_order_id=order_id,
+                    amount=Decimal("500.00"))
+                self.db.add(topup)
+                self.db.commit()
+                payment = {"order_id": order_id, "id": payment_id, "amount": 50000,
+                    "currency": "INR", "status": "captured"}
+                body = json.dumps({"event": "payment.captured",
+                    "payload": {"payment": {"entity": payment}}}).encode()
+                signature = hmac.new(b"test-secret", body, hashlib.sha256).hexdigest()
+                payload = WalletTopUpVerification(razorpay_order_id=order_id,
+                    razorpay_payment_id=payment_id,
+                    razorpay_signature=hmac.new(b"test-secret",
+                        f"{order_id}|{payment_id}".encode(), hashlib.sha256).hexdigest())
+
+                def webhook(event_id):
+                    response = client.post("/api/webhooks/razorpay", content=body, headers={
+                        "x-razorpay-event-id": event_id, "x-razorpay-signature": signature})
+                    self.assertEqual(response.status_code, 200, response.text)
+
+                with patch.object(settings, "razorpay_webhook_secret", "test-secret"), \
+                     patch.object(settings, "razorpay_key_secret", "test-secret"), \
+                     patch("app.routers.commerce.wallet.razorpay_request", return_value=payment):
+                    if webhook_first:
+                        webhook(f"captured_{index}")
+                    verify_topup(payload, self.customer, self.db)
+                    webhook(f"captured_{index}")
+                    verify_topup(payload, self.customer, self.db)
+                    webhook(f"captured_retry_{index}")
+
+                self.assertEqual(self.db.get(WalletAccount, self.customer.id).balance,
+                    Decimal("500.00") * index)
+                self.assertEqual(self.db.query(WalletTransaction).count(), index)
+                notifications = self.db.query(Notification).filter_by(recipient_id=self.customer.id).all()
+                self.assertEqual(len(notifications), index)
+                for notification in notifications:
+                    self.assertEqual(notification.notification_type, "wallet.transaction")
+                    self.assertEqual(notification.title, "Wallet credited")
+                    self.assertIn("₹500.00", notification.message)
+                self.assertEqual(self.db.query(RealtimeEvent).filter_by(
+                    user_id=self.customer.id, event_type="notification.created").count(), index)
 
     def test_webhook_signatures_duplicates_and_out_of_order_events(self):
         topup = WalletTopUp(user_id=self.customer.id, razorpay_order_id="order_test", amount=Decimal("100.00"))

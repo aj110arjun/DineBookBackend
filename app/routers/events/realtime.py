@@ -8,17 +8,19 @@ from threading import BoundedSemaphore
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import or_, func
+from sqlalchemy import func, or_
 
 from app.core.security import decode_access_token
 from app.db.database import SessionLocal
 from app.models.realtime import RealtimeEvent
 from app.models.restaurant import Restaurant
 from app.models.user import User, UserRole
-from app.routers.auth.admin_auth import ACCESS_COOKIE as AUTH_COOKIE
+from app.routers.auth.admin_auth import (
+    ACCESS_COOKIE as AUTH_COOKIE,
+    current_admin,
+)
 from app.routers.auth.chef_auth import current_chef
 from app.routers.auth.customer_auth import current_customer
-from app.routers.auth.admin_auth import current_admin
 from app.routers.auth.manager_auth import current_manager
 
 router = APIRouter(prefix="/api/events", tags=["realtime events"])

@@ -16,3 +16,5 @@ tests/*
 !tests/test_week1_to_3_validation.py
 !tests/test_auto_commission.py
 !tests/test_preorder_menu.py
+!tests/test_order_idempotency.py
+!tests/test_reservation_pricing.py

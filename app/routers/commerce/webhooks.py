@@ -17,7 +17,7 @@ from app.models.realtime import RealtimeEvent, WebhookReceipt
 from app.models.user import User
 from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction
 from app.models.reservation import Reservation
-from app.services.notifications import create_notification
+from app.services.notifications import create_notification, notify_wallet_transaction
 from app.services.reservation_email import send_reservation_confirmation
 from app.services.restaurant_wallet import record_restaurant_payment
 from app.routers.restaurants.reservations import cancel_reservation_record
@@ -279,14 +279,6 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
         notify_wallet_transaction(db, wallet_transaction)
         db.add(RealtimeEvent(user_id=topup.user_id, event_type="payment.status_changed",
             resource_id=str(topup.id), data={"status": "PAID", "resource_type": "wallet_topup"}))
-        customer = db.query(User).filter_by(id=topup.user_id).first()
-        if customer:
-            wallet_url = ("/customer/profile/wallet" if customer.role.value == "CUSTOMER" else
-                "/manager/revenue" if customer.role.value == "MANAGER" else
-                "/chef/revenue" if customer.role.value == "CHEF" else "/admin/revenue")
-            create_notification(db, customer, notification_type="wallet.topup.success", category="PAYMENT",
-                title="Wallet topped up", message="Your wallet top-up was successful.", entity_type="wallet_topup",
-                entity_id=topup.id, action_url=wallet_url, dedupe_key=f"wallet-topup:{topup.id}:paid")
         receipt.outcome = "PROCESSED"
     else:
         receipt.outcome = "DUPLICATE_PAYMENT"

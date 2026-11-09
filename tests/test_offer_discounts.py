@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.db.database import Base
 from app.models.menu import Category, Food, FoodVariant
-from app.models.orders import FoodOrderOffer, OfferRedemption
+from app.models.offers import FoodOrderOffer, OfferRedemption
 from app.models.reservation import Reservation
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.user import User, UserRole
