@@ -20,7 +20,8 @@ from app.db.database import get_db
 from app.core.config import settings
 from app.models.dining import DiningTable, RestaurantFloor
 from app.models.menu import Category, Food, FoodVariant
-from app.models.orders import FoodOrder, FoodOrderOffer, OfferRedemption
+from app.models.orders import FoodOrder
+from app.models.offers import FoodOrderOffer, OfferRedemption
 from app.models.reservation import Reservation, ReservationTable
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.user import User
@@ -36,6 +37,7 @@ from app.routers.auth.manager_auth import current_manager
 from app.routers.restaurants.operating_hours import effective_periods
 from app.services.notifications import notify_wallet_transaction
 from app.services.table_availability import table_statuses
+from app.services.reservation_pricing import reservation_fee_quote
 
 
 customer_router = APIRouter(prefix="/api/customer/reservations", tags=["reservations"])
@@ -86,6 +88,7 @@ class ReservationCreate(BaseModel):
     reservation_date: date
     start_time: time
     duration_minutes: int = Field(default=90, ge=30, le=720)
+    expected_fee_amount: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
     number_of_guests: int = Field(ge=1, le=16)
     table_id: uuid.UUID | None = None
     table_ids: list[uuid.UUID] | None = Field(default=None, min_length=1)
@@ -176,6 +179,10 @@ def reservation_data(item: Reservation, db: Session, include_orders: bool = True
         "completed_at": item.completed_at.isoformat() if item.completed_at else None,
         "status_reason": item.status_reason,
         "payment_status": item.payment_status, "fee_amount": float(item.fee_amount),
+        "base_fee_amount": float(item.base_fee_amount if item.base_fee_amount is not None else item.fee_amount - (item.extra_fee_amount or 0)),
+        "extra_hour_rate": float(item.extra_hour_rate or 0),
+        "extra_hours": item.extra_hours or 0,
+        "extra_fee_amount": float(item.extra_fee_amount or 0),
         "razorpay_order_id": item.razorpay_order_id,
         "razorpay_payment_id": item.razorpay_payment_id,
         "preorder_payment_method": preorder_payment_method,
@@ -285,9 +292,10 @@ def suitable_table_groups(
     return [(table,) for table in available_tables]
 
 
-def table_group_data(group: tuple[DiningTable, ...]) -> dict:
+def table_group_data(group: tuple[DiningTable, ...], duration_minutes: int = 90) -> dict:
     floor_names = list(dict.fromkeys(table.floor.floor_name for table in group))
     table_types = [getattr(table.table_type, "value", table.table_type) for table in group]
+    fee_quote = reservation_fee_quote(group, duration_minutes)
     return {
         "id": ",".join(str(table.id) for table in group),
         "table_ids": [str(table.id) for table in group],
@@ -295,7 +303,8 @@ def table_group_data(group: tuple[DiningTable, ...]) -> dict:
         "floor_name": " / ".join(floor_names),
         "capacity": sum(table.capacity for table in group),
         "table_type": " + ".join(table_types),
-        "reservation_fee": float(sum((Decimal(table.reservation_fee) for table in group), Decimal("0.00"))),
+        "reservation_fee": float(fee_quote["base_fee_amount"]),
+        **{key: float(value) if isinstance(value, Decimal) else value for key, value in fee_quote.items()},
         "floor_id": str(group[0].floor_id),
     }
 
@@ -334,7 +343,7 @@ def floor_layout_data(
         if table.id not in positions:
             positions.update(floor_table_positions(table.floor.tables))
     return [
-        {**table_group_data((table,)), "grid_row": positions[table.id][0],
+        {**table_group_data((table,), duration_minutes), "grid_row": positions[table.id][0],
          "grid_col": positions[table.id][1], "status": statuses[table.id],
          "layout_source": "configured" if table.grid_row is not None
              and table.grid_col is not None else "automatic"}
@@ -574,10 +583,11 @@ def create_reservation(
             )
 
         # Always calculate the charge on the server.
-        fee_amount = sum(
-            (Decimal(table.reservation_fee) for table in selected_group),
-            Decimal("0.00"),
-        )
+        fee_quote = reservation_fee_quote(selected_group, payload.duration_minutes)
+        fee_amount = fee_quote["fee_amount"]
+        if payload.expected_fee_amount is not None and payload.expected_fee_amount != fee_amount:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="The reservation price changed. Refresh availability and review the new total before paying.")
         wallet_preorder_amount = preorder_total if preorder_method == "WALLET" else Decimal("0.00")
         wallet_debit_amount = wallet_preorder_amount + (fee_amount if payload.payment_method == "WALLET" else Decimal("0.00"))
         wallet_account = None
@@ -602,7 +612,7 @@ def create_reservation(
             preorder_tax_amount=preorder_tax_amount if preorder_snapshot else Decimal("0.00"),
             preorder_offer_id=preorder_offer.id if preorder_offer else None,
             preorder_offer_code=preorder_offer.code if preorder_offer else None,
-            fee_amount=fee_amount)
+            **fee_quote)
         db.add(item)
         db.flush()
         checkout = None

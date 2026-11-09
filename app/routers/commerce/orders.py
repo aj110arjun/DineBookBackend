@@ -2,6 +2,7 @@ import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -13,7 +14,8 @@ from app.db.database import get_db
 from app.core.config import settings
 from app.models.dining import DiningTable
 from app.models.menu import Category, Food, FoodVariant
-from app.models.orders import FoodOrder, FoodOrderOffer, OfferRedemption
+from app.models.orders import FoodOrder
+from app.models.offers import FoodOrderOffer, OfferRedemption
 from app.models.reservation import Reservation, ReservationTable
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.user import User
@@ -146,9 +148,9 @@ class SpotOrderPreviewInput(BaseModel):
 
 class SpotOrderInput(SpotOrderPreviewInput):
     idempotency_key: uuid.UUID
-    table_id: uuid.UUID
+    service_type: Literal["DINE_IN", "TAKEAWAY"] = "DINE_IN"
+    table_id: uuid.UUID | None = None
     guest_name: str = Field(min_length=1, max_length=120)
-    items: list[OrderLineInput] = Field(min_length=1, max_length=50)
     customer_note: str | None = Field(default=None, max_length=500)
 
     @field_validator("guest_name")
@@ -158,6 +160,16 @@ class SpotOrderInput(SpotOrderPreviewInput):
         if not value:
             raise ValueError("Guest name is required.")
         return value
+
+    @model_validator(mode="after")
+    def validate_service_type(self):
+        if self.service_type == "DINE_IN" and self.table_id is None:
+            raise ValueError("A table is required for dine-in orders.")
+
+        if self.service_type == "TAKEAWAY" and self.table_id is not None:
+            raise ValueError("Takeaway orders cannot have a table.")
+
+        return self
 
 
 class StatusInput(BaseModel):
@@ -300,6 +312,7 @@ def serialize(order: FoodOrder, db: Session) -> dict:
                     "floor_name": table.floor.floor_name if table.floor else None} for table in assigned_tables],
         "restaurant_id": str(order.restaurant_id),
         "table_id": str(order.table_id) if order.table_id else None,
+        "service_type": order.service_type,
         "restaurant_name": restaurant.name if restaurant else "Restaurant",
         "restaurant_location": ", ".join(part for part in (restaurant.city, restaurant.state) if part) if restaurant else None,
         "restaurant_address": restaurant.address if restaurant else None,
@@ -891,27 +904,68 @@ def manager_preview_spot_order(payload: SpotOrderPreviewInput, manager: User = D
         for key, value in totals.items()}
 
 
+def existing_spot_order(
+    payload: SpotOrderInput,
+    restaurant_id: uuid.UUID,
+    db: Session,
+) -> FoodOrder | None:
+    previous = db.query(FoodOrder).filter(
+        FoodOrder.customer_id.is_(None),
+        FoodOrder.idempotency_key == payload.idempotency_key,
+    ).first()
+
+    if previous is not None and (
+        previous.restaurant_id != restaurant_id
+        or previous.table_id != payload.table_id
+        or previous.service_type != payload.service_type
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="This checkout key was already used for another order.",
+        )
+
+    return previous
+
+
 @manager_router.post("/spot", status_code=201)
 def manager_create_spot_order(payload: SpotOrderInput, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
-    restaurant = staff_restaurant(manager, db)
+    restaurant_id = staff_restaurant(manager, db).id
     try:
-        previous = db.query(FoodOrder).filter(FoodOrder.idempotency_key == payload.idempotency_key).first()
-        if previous:
-            if previous.restaurant_id != restaurant.id or previous.table_id != payload.table_id:
-                raise HTTPException(status_code=409, detail="This checkout key was already used for another order.")
+        previous = existing_spot_order(payload, restaurant_id, db)
+        if previous is not None:
             return serialize(previous, db)
-        table = db.query(DiningTable).filter(
-            DiningTable.id == payload.table_id, DiningTable.restaurant_id == restaurant.id,
-        ).with_for_update().first()
-        if table is None:
-            raise HTTPException(status_code=404, detail="Table not found for this restaurant.")
-        if table.status != "available":
-            raise HTTPException(status_code=409, detail="This table is not available for a spot order.")
-        totals, offer = spot_order_totals(payload, restaurant.id, db)
-        order = FoodOrder(customer_id=None, guest_name=payload.guest_name, table_id=table.id,
-            restaurant_id=restaurant.id, idempotency_key=payload.idempotency_key, **totals, status="ACCEPTED",
-            payment_method="PAY_AT_DESK", payment_status="PENDING", customer_note=payload.customer_note)
-        table.status = "occupied"
+        table = None
+
+        if payload.service_type == "DINE_IN":
+            table = db.query(DiningTable).filter(
+                DiningTable.id == payload.table_id,
+                DiningTable.restaurant_id == restaurant_id,
+            ).with_for_update().first()
+
+            if table is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Table not found for this restaurant.",
+                )
+
+            # Another request may have committed while we waited for the lock.
+            previous = existing_spot_order(payload, restaurant_id, db)
+            if previous is not None:
+                return serialize(previous, db)
+
+            if table.status != "available":
+                raise HTTPException(
+                    status_code=409,
+                    detail="This table is not available for a spot order.",
+                )
+        totals, offer = spot_order_totals(payload, restaurant_id, db)
+        order = FoodOrder(customer_id=None, guest_name=payload.guest_name, service_type=payload.service_type,
+            table_id=table.id if table is not None else None,
+            restaurant_id=restaurant_id, idempotency_key=payload.idempotency_key, **totals, status="ACCEPTED",
+            payment_method="PAY_AT_DESK", payment_status="PENDING", customer_note=payload.customer_note,
+            accepted_at=datetime.now(timezone.utc))
+        if table is not None:
+            table.status = "occupied"
         db.add(order)
         db.flush()
         if offer is not None:
@@ -924,6 +978,12 @@ def manager_create_spot_order(payload: SpotOrderInput, manager: User = Depends(c
         return serialize(order, db)
     except HTTPException:
         db.rollback()
+        raise
+    except IntegrityError:
+        db.rollback()
+        previous = existing_spot_order(payload, restaurant_id, db)
+        if previous is not None:
+            return serialize(previous, db)
         raise
     except Exception:
         db.rollback()

@@ -69,19 +69,16 @@ def build_reservation_invoice_pdf(
         return commands, 548
 
     page, y = start_page()
-    rows: list[tuple[str, int, Decimal, Decimal]] = []
-    table_total = Decimal("0.00")
-    for table in tables:
-        table_fee = Decimal(table.reservation_fee or 0)
-        table_total += table_fee
-        floor = table.floor.floor_name if table.floor else "Dining area"
-        rows.append((f"Table {table.table_number} · {table.capacity} seats · {floor}", 1, table_fee, table_fee))
     fee = Decimal(item.fee_amount or 0)
-    if not rows:
-        rows.append(("Reservation table fee", 1, fee, fee))
-    elif table_total != fee:
-        adjustment = fee - table_total
-        rows.append(("Reservation fee adjustment", 1, adjustment, adjustment))
+    extra = Decimal(getattr(item, "extra_fee_amount", 0) or 0)
+    base_snapshot = getattr(item, "base_fee_amount", None)
+    base = Decimal(base_snapshot) if base_snapshot is not None else fee - extra
+    # Invoice the booked amounts, even if the manager has since edited table prices.
+    rows: list[tuple[str, int, Decimal, Decimal]] = [("Reservation table fee", 1, base, base)]
+    if extra > 0:
+        hours = int(getattr(item, "extra_hours", 0) or 1)
+        rate = Decimal(getattr(item, "extra_hour_rate", None) or extra / hours)
+        rows.append(("Additional dining time - each started hour after the first", hours, rate, extra))
     if has_preorder:
         for entry in item.preorder_items or []:
             label = " ".join(str(part) for part in (entry.get("food_name"), entry.get("variant_name")) if part)

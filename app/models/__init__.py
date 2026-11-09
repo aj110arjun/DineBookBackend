@@ -10,7 +10,13 @@ from app.models.user import AccountStatus, EmailVerificationCode, User, UserRole
 from app.models.dining import DiningTable, Floor, RestaurantFloor
 from app.models.reservation import Reservation, ReservationTable
 from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction, WalletTransfer
-from app.models.orders import FoodOrder, FoodOrderOffer
+from app.models.orders import FoodOrder
+from app.models.offers import (
+    FoodOrderOffer,
+    OfferEligibleFood,
+    OfferEligibleCategory,
+    OfferRedemption,
+)
 from app.models.realtime import RealtimeEvent, WebhookReceipt
 from app.models.reviews import Review, ReviewFlag, ReviewReply, ReviewModerationEvent
 from app.models.notifications import Notification, NotificationPreference
@@ -44,6 +50,9 @@ __all__ = [
     "WalletTransfer",
     "FoodOrder",
     "FoodOrderOffer",
+    "OfferEligibleFood",
+    "OfferEligibleCategory",
+    "OfferRedemption",
     "RealtimeEvent",
     "WebhookReceipt",
     "Review",

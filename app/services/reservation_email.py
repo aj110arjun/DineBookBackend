@@ -56,6 +56,9 @@ def _invoice_totals(item: Reservation) -> tuple[bool, Decimal, Decimal, Decimal,
         ("Reservation time", f"{item.reservation_date.isoformat()} · {item.start_time.strftime('%I:%M %p')}"),
         ("Party size", f"{item.number_of_guests} guests"),
     ]
+    if getattr(item, "extra_hours", 0):
+        extra = Decimal(item.extra_fee_amount or 0)
+        rows.insert(1, ("Extra dining time", f"{item.extra_hours} hr x {_money(item.extra_hour_rate)} = {_money(extra)}"))
     if item.preorder_offer_code:
         rows.append(("Offer applied", f"{item.preorder_offer_code} · discount INR {preorder_discount:.2f}"))
     if has_preorder and preorder_tax:

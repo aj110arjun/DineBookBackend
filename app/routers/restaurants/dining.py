@@ -65,6 +65,7 @@ class TableCreate(BaseModel):
     grid_row: int = Field(ge=0, le=100)
     grid_col: int = Field(ge=0, le=100)
     reservation_fee: Decimal = Field(default=Decimal("250.00"), ge=0, le=100000)
+    extra_hour_fee: Decimal = Field(default=Decimal("0.00"), ge=0, le=100000, decimal_places=2)
     table_type: DiningTableType = DiningTableType.ROUND
     status: str = Field(default="available", pattern="^(available|reserved|occupied|maintenance)$")
 
@@ -84,6 +85,7 @@ class TableUpdate(BaseModel):
     grid_row: int | None = Field(default=None, ge=0, le=100)
     grid_col: int | None = Field(default=None, ge=0, le=100)
     reservation_fee: Decimal | None = Field(default=None, ge=0, le=100000)
+    extra_hour_fee: Decimal | None = Field(default=None, ge=0, le=100000, decimal_places=2)
     table_type: DiningTableType | None = None
     status: str | None = Field(default=None, pattern="^(available|reserved|occupied|maintenance|inactive)$")
 
@@ -127,6 +129,7 @@ def table_data(table: DiningTable) -> dict:
         "table_number": table.table_number, "capacity": table.capacity,
         "seats": table.capacity, "table_type": table.table_type.value, "status": table.status,
         "reservation_fee": float(table.reservation_fee or 0),
+        "extra_hour_fee": float(table.extra_hour_fee or 0),
         "grid_row": table.grid_row, "grid_col": table.grid_col,
     }
 
