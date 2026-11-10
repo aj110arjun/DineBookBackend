@@ -61,7 +61,10 @@ def request_portal_password_reset(
     email = str(payload.email).strip().lower()
     account = db.query(User).filter(User.email == email, User.role == role).first()
     response = {"message": "If an account exists, a password reset code has been sent."}
-    if account is None:
+
+    if account is None or (
+        role == UserRole.CHEF and account.chef_invite_expires_at is not None
+    ):
         return response
 
     code = f"{secrets.randbelow(1_000_000):06d}"
@@ -96,6 +99,13 @@ def reset_portal_password(
     now = datetime.now(timezone.utc)
     if account is None or verification is None or verification_code_expired(verification.expires_at, now):
         raise HTTPException(status_code=400, detail="That reset code has expired. Request a new code.")
+
+    if role == UserRole.CHEF and account.chef_invite_expires_at is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="That reset code is invalid or has expired."
+        )
+    
     if not verify_secret(payload.code, verification.code_hash):
         raise HTTPException(status_code=400, detail="That reset code is incorrect.")
     account.password_hash = hash_password(payload.new_password)

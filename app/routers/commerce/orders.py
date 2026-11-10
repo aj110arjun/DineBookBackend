@@ -42,6 +42,12 @@ MANAGER_TRANSITIONS = {
     "ACCEPTED": {"CANCELLED"},
     "PREPARING": {"CANCELLED"},
     "READY": {"COMPLETED"},
+    "SERVED": {"COMPLETED"},
+}
+CHEF_TRANSITIONS = {
+    "ACCEPTED": {"PREPARING"},
+    "PREPARING": {"READY"},
+    "READY": {"SERVED"},
 }
 
 
@@ -76,7 +82,6 @@ def reverse_offer_redemption(db: Session, order: FoodOrder) -> None:
     if offer is not None:
         offer.uses = max(0, offer.uses - 1)
     redemption.status = "REVERSED"
-CHEF_TRANSITIONS = {"ACCEPTED": {"PREPARING"}, "PREPARING": {"READY"}}
 
 
 @customer_router.get("/tax-rate")
@@ -173,7 +178,7 @@ class SpotOrderInput(SpotOrderPreviewInput):
 
 
 class StatusInput(BaseModel):
-    status: str = Field(pattern="^(ACCEPTED|PREPARING|READY|COMPLETED|CANCELLED|REJECTED)$")
+    status: str = Field(pattern="^(ACCEPTED|PREPARING|READY|SERVED|COMPLETED|CANCELLED|REJECTED)$")
     reason: str | None = Field(default=None, max_length=500)
 
     @field_validator("reason")

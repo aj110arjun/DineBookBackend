@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -331,7 +332,21 @@ def manager_reviews(manager: User = Depends(current_manager), db: Session = Depe
     }
 
 @admin_router.get("")
-def moderation_queue(admin: User = Depends(current_admin), db: Session = Depends(get_db), status: str = "PENDING", reason: str | None = None, flagged_by: str | None = None, rating: int | None = Query(None, ge=1, le=5), date_from: datetime | None = None, date_to: datetime | None = None, min_reports: int = Query(1, ge=1), search: str | None = None, offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100)) -> dict:
+def moderation_queue(
+    admin: User = Depends(current_admin),
+    db: Session = Depends(get_db),
+    status: str = "PENDING",
+    reason: str | None = None,
+    flagged_by: str | None = None,
+    rating: int | None = Query(None, ge=1, le=5),
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    min_reports: int = Query(1, ge=1),
+    search: str | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(25, ge=1, le=100),
+    sort: Literal["oldest", "newest", "rating-low", "rating-high"] = "oldest",
+) -> dict:
     query = db.query(ReviewFlag, Review).join(Review, Review.id == ReviewFlag.review_id)
     if status.upper() != "ALL": query = query.filter(ReviewFlag.status == status.upper())
     if reason: query = query.filter(ReviewFlag.reason == reason.upper())
@@ -343,7 +358,14 @@ def moderation_queue(admin: User = Depends(current_admin), db: Session = Depends
         report_counts = db.query(ReviewFlag.review_id).group_by(ReviewFlag.review_id).having(func.count(ReviewFlag.id) >= min_reports).subquery()
         query = query.filter(ReviewFlag.review_id.in_(db.query(report_counts.c.review_id)))
     if search: query = query.filter(Review.content.ilike(f"%{search[:100]}%"))
-    total = query.count(); rows = query.order_by(ReviewFlag.created_at.asc()).offset(offset).limit(limit).all()
+    total = query.count()
+    ordering = {
+        "oldest": (ReviewFlag.created_at.asc(),),
+        "newest": (ReviewFlag.created_at.desc(),),
+        "rating-low": (Review.rating.asc(), ReviewFlag.created_at.asc()),
+        "rating-high": (Review.rating.desc(), ReviewFlag.created_at.asc()),
+    }[sort]
+    rows = query.order_by(*ordering, ReviewFlag.id.asc()).offset(offset).limit(limit).all()
     items = []
     for flag, review in rows:
         reporter = db.get(User, flag.manager_id or flag.customer_id)

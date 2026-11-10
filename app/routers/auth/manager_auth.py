@@ -233,7 +233,6 @@ async def register_manager(
     restaurant_description: str = Form(""),
     cuisine_type: str = Form(...),
     restaurant_contact: str = Form(...),
-    restaurant_email: EmailStr = Form(...),
 
     address: str = Form(...),
     city: str = Form(...),
@@ -289,7 +288,6 @@ async def register_manager(
     restaurant_description = restaurant_description.strip()
     cuisine_type = cuisine_type.strip()
     restaurant_contact = restaurant_contact.strip()
-    restaurant_email = str(restaurant_email).strip().lower()
 
     address = address.strip()
     city = city.strip()
@@ -315,7 +313,7 @@ async def register_manager(
 
     for value, label, minimum, maximum in (
         (restaurant_name, "Restaurant name", 2, 255), (cuisine_type, "Cuisine type", 2, 100),
-        (restaurant_contact, "Restaurant contact", 6, 20), (address, "Address", 2, 500),
+        (address, "Address", 2, 500),
         (city, "City", 2, 100), (state, "State", 2, 100), (pin_code, "PIN code", 3, 20),
     ):
         if not minimum <= len(value) <= maximum:
@@ -324,8 +322,16 @@ async def register_manager(
         raise HTTPException(status_code=400, detail="Restaurant name may only contain letters, numbers, spaces, apostrophes, hyphens, and periods.")
     if len(restaurant_description) > 2000:
         raise HTTPException(status_code=400, detail="Restaurant description cannot exceed 2000 characters.")
-    if not re.fullmatch(r"\+?[0-9][0-9 ()-]{5,18}[0-9]", restaurant_contact):
-        raise HTTPException(status_code=400, detail="Enter a valid restaurant phone number.")
+    phone_digits = re.findall(r"[0-9]", restaurant_contact)
+    if (
+        not 7 <= len(restaurant_contact) <= 20
+        or not 7 <= len(phone_digits) <= 15
+        or not re.fullmatch(r"\+?(?:[0-9]|\([0-9]+\))(?:[ -]?(?:[0-9]|\([0-9]+\)))*", restaurant_contact)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Enter 7–15 digits. A leading +, spaces, hyphens, and parentheses are allowed (20 characters max).",
+        )
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 -]{1,18}[A-Za-z0-9]", pin_code):
         raise HTTPException(status_code=400, detail="Enter a valid PIN or ZIP code.")
 
@@ -388,7 +394,7 @@ async def register_manager(
         name=restaurant_name,
         description=restaurant_description or None,
         cuisine_type=cuisine_type,
-        email=restaurant_email,
+        email=email,
         phone=restaurant_contact,
         address=address,
         city=city,

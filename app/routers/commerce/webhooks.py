@@ -110,7 +110,7 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
             .with_for_update()
             .first()
         )
-        if failed_reservation and failed_reservation.payment_status != "PAID":
+        if failed_reservation and failed_reservation.payment_status not in {"PAID", "REFUNDED"}:
             cancel_reservation_record(db, failed_reservation, None, "Reservation payment failed.")
             failed_reservation.payment_status = "FAILED"
             if failed_reservation.preorder_payment_method == "RAZORPAY":
@@ -209,7 +209,10 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> d
             db.rollback()
             logger.warning("Razorpay captured event amount mismatch for event %s", provider_event_id)
             raise HTTPException(status_code=400, detail="Captured payment does not match the reservation.")
-        if reservation.payment_status != "PAID":
+        already_captured = reservation.payment_status == "PAID" or (
+            reservation.payment_status == "REFUNDED" and reservation.razorpay_payment_id == payment_id
+        )
+        if not already_captured:
             if reservation.status != "PENDING_PAYMENT":
                 receipt.outcome = "REVIEW"
                 db.commit()
