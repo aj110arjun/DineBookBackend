@@ -13,7 +13,6 @@ class ManagerRegisterRequest(BaseModel):
     cuisine_type: str = Field(min_length=2, max_length=100)
 
     restaurant_contact: str = Field(min_length=6, max_length=20)
-    restaurant_email: EmailStr
 
     # Address
     address: str = Field(min_length=2, max_length=500)
@@ -40,7 +39,7 @@ class ManagerRegisterRequest(BaseModel):
             raise ValueError("Name may only contain letters, numbers, spaces, apostrophes, hyphens, and periods")
         return value
 
-    @field_validator("email", "restaurant_email")
+    @field_validator("email")
     @classmethod
     def normalize_emails(cls, value: EmailStr) -> str:
         return str(value).strip().lower()

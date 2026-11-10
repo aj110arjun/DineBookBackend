@@ -7,6 +7,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from datetime import datetime, timedelta, timezone
+
 from app.core.config import settings
 from app.core.email import send_branded_email
 from app.core.security import hash_password
@@ -16,6 +18,8 @@ from app.models.restaurant import Restaurant
 from app.models.restaurant_staff import RestaurantStaff
 from app.routers.auth.manager_auth import current_manager
 
+
+CHEF_INVITE_LIFETIME = timedelta(days=5)
 router = APIRouter(prefix="/api/manager/staff", tags=["manager staff"])
 
 
@@ -49,8 +53,19 @@ class StaffMemberCreateRequest(BaseModel):
 
 
 def chef_dict(chef: User) -> dict:
-    return {"id": str(chef.id), "name": chef.name, "email": chef.email, "role": chef.role.value, "status": chef.status.value, "is_active": chef.is_active}
+    invite_status = None
+    if chef.chef_invite_expires_at is not None:
+        invite_status = "expired" if chef.chef_invite_expired else "pending"
 
+    return {
+        "id": str(chef.id),
+        "name": chef.name,
+        "email": chef.email,
+        "role": chef.role.value,
+        "status": chef.status.value,
+        "is_active": chef.is_active,
+        "invite_status": invite_status
+    }
 
 def staff_member_dict(member: RestaurantStaff) -> dict:
     return {"id": str(member.id), "name": member.name, "created_at": member.created_at.isoformat()}
@@ -149,7 +164,7 @@ def create_chef(payload: ChefCreateRequest, manager: User = Depends(current_mana
         is_active=True,
         email_verified=True,
         must_change_password=True,
-
+        chef_invite_expires_at=datetime.now(timezone.utc) + CHEF_INVITE_LIFETIME,
         manager_id=manager.id,
     )
     db.add(chef)
@@ -171,3 +186,51 @@ def deactivate_chef(chef_id: uuid.UUID, manager: User = Depends(current_manager)
     chef.status = AccountStatus.INACTIVE
     db.commit()
     return {"message": "Chef account deactivated."}
+
+@router.post("/{chef_id}/resend-invitation")
+def resend_chef_invitation(chef_id: uuid.UUID, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict[str, str]:
+    chef = (
+        db.query(User)
+        .filter(
+            User.id == chef_id,
+            User.manager_id == manager.id,
+            User.role == UserRole.CHEF
+        )
+        .with_for_update()
+        .first()
+    )
+
+    if chef is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Chef Account not found."
+        )
+
+    if chef.status !=  AccountStatus.ACTIVE or not chef.is_active:
+        raise HTTPException(
+            status_code=400,
+            detail="This chef account is disabled."
+        )
+
+    if not chef.chef_invite_expired:
+        raise HTTPException(
+            status_code=400,
+            detail="Only expired invitations can be reissued."
+        )
+
+    temporary_password = secrets.token_urlsafe(12)
+    now = datetime.now(timezone.utc)
+    chef.password_hash = hash_password(temporary_password)
+    chef.password_changed_at = now
+    chef.must_change_password = True
+    chef.chef_invite_expires_at = now + CHEF_INVITE_LIFETIME
+
+    try:
+        db.flush()
+        send_chef_credentials(chef.email, chef.name, temporary_password)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return {"message": "A new invitation was emailed to the chef."}

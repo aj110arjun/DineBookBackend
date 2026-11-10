@@ -224,7 +224,7 @@ class DatabaseTests(unittest.TestCase):
         change_chef_password(ChefChangePasswordRequest(password="Replacement123!"), Response(), self.customer, self.db)
         self.assertFalse(self.customer.must_change_password)
 
-    def test_paid_order_retries_preserve_timestamp_and_table_until_completion(self):
+    def test_paid_and_served_order_keeps_table_occupied_until_manager_completes_it(self):
         self.db.add(User(name="Admin", email="payment-admin@example.com", password_hash="unused", role=UserRole.ADMIN))
         self.db.add(WalletAccount(user_id=self.manager.id, balance=Decimal("100.00")))
         floor = RestaurantFloor(restaurant_id=self.restaurant.id, floor_number=1, floor_name="Main")
@@ -232,14 +232,31 @@ class DatabaseTests(unittest.TestCase):
         table = DiningTable(restaurant_id=self.restaurant.id, floor_id=floor.id, table_number="1", capacity=2, status="occupied")
         self.db.add(table); self.db.flush()
         order = FoodOrder(restaurant_id=self.restaurant.id, table_id=table.id, items=[], subtotal=100, total=118,
-                          status="READY", payment_method="PAY_AT_DESK", payment_status="PENDING")
-        self.db.add(order); self.db.commit()
+                          status="PREPARING", payment_method="PAY_AT_DESK", payment_status="PENDING")
+        chef = User(name="Chef", email="serve-order@example.com", password_hash="unused",
+                    role=UserRole.CHEF, manager_id=self.manager.id)
+        self.db.add_all([order, chef])
+        self.db.commit()
+        with self.assertRaises(HTTPException) as premature:
+            chef_update_order(order.id, StatusInput(status="SERVED"), chef, self.db)
+        self.assertEqual(premature.exception.status_code, 409)
+        chef_update_order(order.id, StatusInput(status="READY"), chef, self.db)
         manager_mark_order_paid(order.id, self.manager, self.db)
         paid_at = order.paid_at
         self.assertEqual(table.status, "occupied")
         manager_mark_order_paid(order.id, self.manager, self.db)
         self.assertEqual(order.paid_at, paid_at)
+        served = chef_update_order(order.id, StatusInput(status="SERVED"), chef, self.db)
+        self.assertEqual(served["status"], "SERVED")
+        self.assertEqual(served["payment_status"], "PAID")
+        self.assertEqual(order.paid_at, paid_at)
+        self.assertIsNone(order.completed_at)
+        self.assertEqual(table.status, "occupied")
+        with self.assertRaises(HTTPException) as denied:
+            chef_update_order(order.id, StatusInput(status="COMPLETED"), chef, self.db)
+        self.assertEqual(denied.exception.status_code, 409)
         update_status(order.id, "COMPLETED", MANAGER_TRANSITIONS, self.manager, self.db)
+        self.assertEqual(order.status, "COMPLETED")
         self.assertEqual(table.status, "available")
 
     def paid_reservation(self):

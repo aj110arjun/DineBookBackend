@@ -14,6 +14,8 @@ from app import db
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import String, and_, cast, func, or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.database import get_db
@@ -789,15 +791,16 @@ def cancel_reservation(reservation_id: uuid.UUID, customer: User = Depends(curre
     return {"message": "Reservation cancelled.", "wallet_refund": float(refund_amount)}
 
 
-def cancel_reservation_record(db: Session, item: Reservation, actor: User | None, reason: str) -> Decimal:
-    """Cancel an unpaid booking and release its preorder offer claim in the same transaction."""
+def cancel_reservation_record(db: Session, item: Reservation, actor: User | None,
+                              reason: str | None, *, full_refund: bool = False) -> Decimal:
+    """Cancel the booking and settle its eligible refund in the same transaction."""
     if item.status not in ("PENDING_PAYMENT", "CONFIRMED"):
         return Decimal("0.00")
     previous_status = item.status
-    refund_amount = refund_wallet_reservation(db, item)
+    refund_amount = refund_wallet_reservation(db, item, full_refund=full_refund)
     item.status = "CANCELLED"
-    item.status_reason = reason[:500]
-    if item.payment_status != "PAID":
+    item.status_reason = reason[:500] if reason is not None else None
+    if item.payment_status == "PENDING":
         item.payment_status = "FAILED"
     if item.preorder_payment_status == "PENDING":
         item.preorder_payment_status = "CANCELLED"
@@ -805,7 +808,7 @@ def cancel_reservation_record(db: Session, item: Reservation, actor: User | None
     return refund_amount
 
 
-def refund_wallet_reservation(db: Session, item: Reservation) -> Decimal:
+def refund_wallet_reservation(db: Session, item: Reservation, *, full_refund: bool = False) -> Decimal:
     existing_refund = db.query(WalletTransaction.id).filter(
         WalletTransaction.reservation_id == item.id,
         WalletTransaction.transaction_type == "REFUND",
@@ -824,27 +827,36 @@ def refund_wallet_reservation(db: Session, item: Reservation) -> Decimal:
     if booking_time is not None and booking_time.tzinfo is None:
         booking_time = booking_time.replace(tzinfo=timezone.utc)
     within_refund_window = booking_time is not None and datetime.now(timezone.utc) <= booking_time + timedelta(days=1)
-    digitally_paid_methods = {"WALLET", "RAZORPAY"}
-    fee_refundable = (item.payment_method in digitally_paid_methods and item.payment_status == "PAID"
-                      and within_refund_window)
-    preorder_paid_digitally = (item.preorder_payment_status == "PAID"
-                               and item.preorder_payment_method in digitally_paid_methods)
+    refundable_methods = {"WALLET", "RAZORPAY", "PAY_AT_DESK"}
+    fee_refundable = (item.payment_method in refundable_methods and item.payment_status == "PAID"
+                      and (full_refund or within_refund_window))
+    preorder_paid = (item.preorder_payment_status == "PAID"
+                     and item.preorder_payment_method in refundable_methods)
     # Legacy preorder records used the reservation payment fields for both charges.
     legacy_preorder_paid = (item.preorder_payment_status is None and item.fulfillment_type == "PREORDER"
                             and item.payment_method == "WALLET" and item.payment_status == "PAID")
-    preorder_refundable = preorder_paid_digitally or legacy_preorder_paid
+    preorder_refundable = preorder_paid or legacy_preorder_paid
     refund_amount = (Decimal(item.fee_amount) if fee_refundable else Decimal("0.00"))
     if preorder_refundable:
         refund_amount += Decimal(item.preorder_total or 0)
     if refund_amount <= 0:
         return Decimal("0.00")
-    account = db.query(WalletAccount).filter(WalletAccount.user_id == item.user_id).with_for_update().first()
+    wallet = (db.query(WalletAccount).filter(WalletAccount.user_id == item.user_id)
+              .populate_existing().with_for_update())
+    account = wallet.first()
     if account is None:
-        raise HTTPException(status_code=409, detail="Wallet account is unavailable; contact support to complete this refund.")
+        insert = sqlite_insert if db.get_bind().dialect.name == "sqlite" else pg_insert
+        db.execute(
+            insert(WalletAccount).values(user_id=item.user_id, balance=Decimal("0.00"))
+            .on_conflict_do_nothing(index_elements=["user_id"])
+        )
+        account = wallet.one()
     account.balance = Decimal(account.balance) + refund_amount
     if fee_refundable:
         item.payment_status = "REFUNDED"
     if preorder_refundable:
+        if legacy_preorder_paid:
+            item.preorder_payment_method = "WALLET"
         item.preorder_payment_status = "REFUNDED"
     wallet_transaction = WalletTransaction(user_id=item.user_id, reservation_id=item.id, amount=refund_amount,
         transaction_type="REFUND", description="Wallet refund for cancelled reservation",
@@ -897,8 +909,8 @@ def manager_calendar_summary(
     }
     order_tones = {
         "PLACED": "pending", "ACCEPTED": "confirmed", "PREPARING": "confirmed",
-        "READY": "completed", "COMPLETED": "completed", "CANCELLED": "cancelled",
-        "REJECTED": "cancelled",
+        "READY": "completed", "SERVED": "completed", "COMPLETED": "completed",
+        "CANCELLED": "cancelled", "REJECTED": "cancelled",
     }
     for reservation_day, status_value, count, guest_count in reservation_rows:
         key = reservation_day.isoformat()
@@ -969,7 +981,7 @@ def manager_calendar_activities(
         )
     if status_filter:
         reservation_statuses = {"CONFIRMED", "PENDING_PAYMENT", "CANCELLED", "REJECTED", "NO_SHOW", "COMPLETED", "SEATED"}
-        order_statuses = {"PLACED", "ACCEPTED", "PREPARING", "READY", "COMPLETED", "CANCELLED", "REJECTED"}
+        order_statuses = {"PLACED", "ACCEPTED", "PREPARING", "READY", "SERVED", "COMPLETED", "CANCELLED", "REJECTED"}
         matching_statuses = []
         if status_filter in reservation_statuses:
             matching_statuses.append(Reservation.status == status_filter)
@@ -1265,12 +1277,8 @@ def manager_cancel_reservation(reservation_id: uuid.UUID, payload: ManagerReserv
     ).first()
     if active_orders:
         raise HTTPException(status_code=409, detail="Cancel or complete the linked food orders before cancelling this reservation.")
-    previous_status = item.status
     reason = payload.reason.strip() if payload and payload.reason else None
-    refund_amount = refund_wallet_reservation(db, item)
-    item.status = "CANCELLED"
-    item.status_reason = reason
-    record_reservation_event(db, item, previous_status, manager, reason)
+    refund_amount = cancel_reservation_record(db, item, manager, reason, full_refund=True)
     db.commit()
     return {"message": "Reservation cancelled.", "wallet_refund": float(refund_amount)}
 

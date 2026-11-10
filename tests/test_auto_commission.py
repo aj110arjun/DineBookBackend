@@ -4,7 +4,7 @@ import hmac
 import json
 import unittest
 import uuid
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -28,8 +28,8 @@ from app.routers.commerce.revenue import (
     CommissionUpdate, manager_revenue, pay_admin_commission, update_commission, wallet_summary,
 )
 from app.routers.restaurants.reservations import (
-    ReservationPaymentVerification, manager_confirm_payment, manager_confirm_preorder_payment,
-    refund_wallet_reservation, verify_reservation_payment,
+    ReservationPaymentVerification, cancel_reservation, manager_cancel_reservation,
+    manager_confirm_payment, manager_confirm_preorder_payment, verify_reservation_payment,
 )
 from app.routers.commerce.webhooks import razorpay_webhook
 from app.services.commission import settings_row
@@ -136,27 +136,82 @@ class AutomaticCommissionTests(unittest.TestCase):
 
     def test_reservation_refund_reverses_fee_and_preorder_separately(self):
         row = self.reservation(fee="100.00", preorder="1000.00")
+        now = datetime.now(timezone.utc)
+        row.created_at = now - timedelta(hours=24)
         self.pay(row)
         self.pay(row, "preorder")
         self.db.commit()
-        self.assertEqual(refund_wallet_reservation(self.db, row), Decimal("1100.00"))
-        self.db.commit()
+        with patch("app.routers.restaurants.reservations.datetime", wraps=datetime) as clock:
+            clock.now.return_value = now
+            result = cancel_reservation(row.id, self.customer, self.db)
+        self.assertEqual(result["wallet_refund"], 1100)
+        self.assertEqual(row.status, "CANCELLED")
+        self.assertEqual(row.payment_status, "REFUNDED")
+        self.assertEqual(row.preorder_payment_status, "REFUNDED")
         self.assertEqual(self.balance(self.customer), 1100)
         self.assertEqual(self.balance(self.manager), 0)
         self.assertEqual(self.balance(self.admin), 0)
-        self.assertEqual(refund_wallet_reservation(self.db, row), 0)
+        with self.assertRaises(HTTPException) as retry:
+            manager_cancel_reservation(row.id, manager=self.manager, db=self.db)
+        self.assertEqual(retry.exception.status_code, 409)
+        self.assertEqual(self.db.query(WalletTransaction).filter_by(transaction_type="REFUND").count(), 1)
 
     def test_expired_fee_is_retained_when_preorder_is_refunded(self):
-        from datetime import timedelta
         row = self.reservation(fee="100.00", preorder="1000.00")
-        row.created_at = datetime.now(timezone.utc) - timedelta(days=2)
+        row.created_at = datetime.now(timezone.utc) - timedelta(hours=25)
         self.pay(row)
         self.pay(row, "preorder")
         self.db.commit()
-        self.assertEqual(refund_wallet_reservation(self.db, row), Decimal("1000.00"))
-        self.db.commit()
+        result = cancel_reservation(row.id, self.customer, self.db)
+        self.assertEqual(result["wallet_refund"], 1000)
+        self.assertEqual(row.payment_status, "PAID")
+        self.assertEqual(row.preorder_payment_status, "REFUNDED")
+        self.assertEqual(self.balance(self.customer), 1000)
         self.assertEqual(self.balance(self.manager), 90)
         self.assertEqual(self.balance(self.admin), 10)
+
+    def test_legacy_wallet_preorder_without_separate_payment_fields_is_refunded(self):
+        row = self.reservation(preorder="1000.00")
+        row.preorder_payment_method = None
+        row.preorder_payment_status = None
+        row.preorder_paid_at = None
+        row.created_at = datetime.now(timezone.utc) - timedelta(hours=25)
+        self.pay(row)
+        self.pay(row, "preorder")
+        self.db.commit()
+
+        self.assertEqual(cancel_reservation(row.id, self.customer, self.db)["wallet_refund"], 1000)
+        self.assertEqual(row.preorder_payment_method, "WALLET")
+        self.assertEqual(row.preorder_payment_status, "REFUNDED")
+        self.assertEqual(self.balance(self.customer), 1000)
+
+    def test_manager_cancels_paid_desk_booking_and_funds_wallet_refund(self):
+        row = self.reservation(fee="100.00", preorder="1000.00", method="PAY_AT_DESK")
+        row.created_at = datetime.now(timezone.utc) - timedelta(hours=25)
+        self.fund_manager("1100.00")
+        self.pay(row, credit_gross=False)
+        self.pay(row, "preorder", credit_gross=False)
+        self.db.commit()
+        result = manager_cancel_reservation(row.id, manager=self.manager, db=self.db)
+        self.assertEqual(result["wallet_refund"], 1100)
+        self.assertEqual(self.balance(self.customer), 1100)
+        self.assertEqual(self.balance(self.manager), 0)
+        self.assertEqual(self.balance(self.admin), 0)
+
+    def test_manager_cancellation_refunds_only_paid_components(self):
+        row = self.reservation(preorder="1000.00")
+        row.preorder_payment_method = "PAY_AT_DESK"
+        row.preorder_payment_status = "PENDING"
+        row.preorder_paid_at = None
+        self.pay(row)
+        self.db.commit()
+        result = manager_cancel_reservation(row.id, manager=self.manager, db=self.db)
+        self.assertEqual(result["wallet_refund"], 100)
+        self.assertEqual(row.payment_status, "REFUNDED")
+        self.assertEqual(row.preorder_payment_status, "CANCELLED")
+        self.assertEqual(self.balance(self.customer), 100)
+        self.assertEqual(self.balance(self.manager), 0)
+        self.assertEqual(self.balance(self.admin), 0)
 
     def test_desk_order_transfers_only_commission(self):
         self.fund_manager("200.00")
@@ -293,8 +348,8 @@ class AutomaticCommissionTests(unittest.TestCase):
         self.assertEqual(self.balance(self.manager), 950)
         self.assertEqual(self.balance(self.admin), 50)
 
-    def razorpay_callback(self, row, event_id):
-        body = json.dumps({"event": "payment.captured", "payload": {"payment": {"entity": {
+    def razorpay_callback(self, row, event_id, event_type="payment.captured"):
+        body = json.dumps({"event": event_type, "payload": {"payment": {"entity": {
             "order_id": row.razorpay_order_id, "id": "pay_commission", "amount": 150000,
             "currency": "INR", "status": "captured",
         }}}}).encode()
@@ -320,6 +375,25 @@ class AutomaticCommissionTests(unittest.TestCase):
             return_value={"order_id": row.razorpay_order_id, "amount": 150000, "currency": "INR", "status": "captured"},
         ):
             return verify_reservation_payment(row.id, payload, BackgroundTasks(), self.customer, self.db)
+
+    def test_manager_refunds_older_razorpay_booking_to_a_new_wallet(self):
+        row = self.reservation(fee="1000", preorder="500", method="RAZORPAY", paid=False)
+        row.razorpay_order_id = "order_manager_refund"
+        row.created_at = datetime.now(timezone.utc) - timedelta(hours=25)
+        self.db.delete(self.db.get(WalletAccount, self.customer.id))
+        self.db.commit()
+        self.verify_razorpay(row)
+
+        result = manager_cancel_reservation(row.id, manager=self.manager, db=self.db)
+        self.assertEqual(result["wallet_refund"], 1500)
+        self.assertEqual(self.balance(self.customer), 1500)
+        self.assertEqual(self.balance(self.manager), 0)
+        self.assertEqual(self.balance(self.admin), 0)
+        self.razorpay_callback(row, "late-failed", "payment.failed")
+        self.assertEqual(self.razorpay_callback(row, "late-capture")["status"], "processed")
+        self.assertEqual(row.payment_status, "REFUNDED")
+        self.assertEqual(row.preorder_payment_status, "REFUNDED")
+        self.assertEqual(self.balance(self.customer), 1500)
 
     def test_razorpay_webhook_then_verification_does_not_duplicate_settlement(self):
         row = self.reservation(fee="1000", preorder="500", method="RAZORPAY", paid=False)

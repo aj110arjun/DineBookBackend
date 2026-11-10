@@ -13,6 +13,7 @@ from app.models.orders import FoodOrder
 from app.models.reviews import Review, ReviewFlag, ReviewModerationEvent, ReviewReply
 from app.models.user import User, UserRole
 from app.routers.restaurants.reviews import ReplyPayload, reply_to_review, ActionPayload, ReviewPayload, FlagPayload, create_review, update_review, moderate, flag_review, manager_flag_review, manager_router, delete_own_review, public_reviews
+from app.routers.restaurants.reviews import moderation_queue
 
 
 class ReviewModerationTests(unittest.TestCase):
@@ -56,6 +57,39 @@ class ReviewModerationTests(unittest.TestCase):
         self.assertEqual(self.flag.status, "DISMISSED")
         self.assertEqual(self.review.status, "PUBLISHED")
         self.assertEqual(self.db.query(ReviewModerationEvent).count(), 0)
+
+    def test_moderation_queue_filters_and_sorts_before_paginating(self):
+        other = User(name="Other reviewer", email="other@example.com", password_hash="x", role=UserRole.CUSTOMER)
+        self.db.add(other)
+        self.db.flush()
+        second = Review(customer_id=other.id, restaurant_id=self.restaurant.id, rating=4, content="Good experience")
+        self.db.add(second)
+        self.db.flush()
+        reported_at = datetime.now(timezone.utc)
+        first_flag = ReviewFlag(id=uuid.UUID(int=1), review_id=self.review.id, manager_id=self.manager.id,
+                                reason="ABUSIVE", created_at=reported_at)
+        second_flag = ReviewFlag(id=uuid.UUID(int=2), review_id=second.id, manager_id=self.manager.id,
+                                 reason="ABUSIVE", created_at=reported_at)
+        resolved = ReviewFlag(review_id=second.id, manager_id=self.manager.id, status="RESOLVED",
+                              reason="SPAM", created_at=reported_at + timedelta(minutes=1))
+        self.db.add_all([second_flag, resolved, first_flag])
+        self.db.commit()
+
+        def queue(rating=None, **filters):
+            return moderation_queue(
+                self.admin, self.db, flagged_by="MANAGER", rating=rating, min_reports=1, limit=1, **filters
+            )
+
+        for offset, expected in enumerate((first_flag, second_flag)):
+            with self.subTest(offset=offset):
+                page = queue(offset=offset, reason="ABUSIVE", search="experience")
+                self.assertEqual(page["total"], 2)
+                self.assertEqual([item["flag_id"] for item in page["items"]], [str(expected.id)])
+
+        self.assertEqual(queue(offset=0, sort="rating-high")["items"][0]["flag_id"], str(second_flag.id))
+        filtered = queue(offset=0, status="ALL", rating=4, sort="newest")
+        self.assertEqual(filtered["total"], 2)
+        self.assertEqual(filtered["items"][0]["flag_id"], str(resolved.id))
 
     def test_customer_can_review_completed_order_once(self):
         self.db.delete(self.flag); self.db.delete(self.review); self.db.commit()

@@ -95,6 +95,7 @@ def login_chef(
     chef = (
         db.query(User)
         .filter(User.email == email, User.role == UserRole.CHEF)
+        .with_for_update()
         .first()
     )
 
@@ -126,6 +127,16 @@ def login_chef(
     restaurant = db.query(Restaurant).filter(Restaurant.manager_id == chef.manager_id).first()
     if restaurant is not None and restaurant.status.value == "SUSPENDED":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This restaurant has been suspended.")
+
+    if chef.chef_invite_expired:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your chef invitation has expired. Ask your manager to resend it."
+        )
+
+    if chef.chef_invite_expires_at is not None:
+        chef.chef_invite_expires_at = None
+        db.commit()
 
     token, _ = create_access_token(str(chef.id))
     response.set_cookie(
