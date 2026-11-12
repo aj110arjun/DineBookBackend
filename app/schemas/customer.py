@@ -2,6 +2,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, mo
 import uuid
 
 from app.models.user import AccountStatus, UserRole
+from app.core.security import validate_new_password
 
 
 class CustomerRegisterRequest(BaseModel):
@@ -9,6 +10,8 @@ class CustomerRegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=10, max_length=128)
     confirm_password: str = Field(min_length=10, max_length=128)
+
+    _password_policy = field_validator("password")(validate_new_password)
 
     @field_validator("name")
     @classmethod
@@ -41,3 +44,4 @@ class CustomerResponse(BaseModel):
     role: UserRole
     status: AccountStatus
     is_active: bool
+    can_change_email: bool = False

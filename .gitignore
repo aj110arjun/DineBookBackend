@@ -7,3 +7,15 @@ __pycache__/
 uploads/
 scripts/
 tests/
+!tests/
+tests/*
+!tests/test_offer_discounts.py
+!tests/test_reviews.py
+!tests/__init__.py
+!tests/sqlite_support.py
+!tests/test_week1_to_3_validation.py
+!tests/test_auto_commission.py
+!tests/test_preorder_menu.py
+!tests/test_order_idempotency.py
+!tests/test_reservation_pricing.py
+!tests/test_manager_calendar.py

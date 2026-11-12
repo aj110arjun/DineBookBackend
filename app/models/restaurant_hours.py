@@ -1,11 +1,13 @@
 import uuid
 
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Date,
     ForeignKey,
+    JSON,
     String,
     Time,
     UniqueConstraint,
@@ -60,6 +62,8 @@ class RestaurantHours(Base):
         nullable=True,
     )
 
+    periods: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -72,3 +76,22 @@ class RestaurantHours(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+
+
+class RestaurantHoursException(Base):
+    __tablename__ = "restaurant_hours_exceptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    restaurant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("restaurants.id", ondelete="CASCADE"), nullable=False, index=True)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    is_closed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    periods: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    internal_note: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

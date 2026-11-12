@@ -1,30 +1,44 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
 import os
+
+from decimal import Decimal
 from pathlib import Path
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    database_url: str = os.getenv("DATABASE_URL")
-    frontend_url: str = "http://localhost:5173"
+    database_url: str = ""
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def require_database_url(cls, value):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Set DATABASE_URL in DineBookBackend/.env to your PostgreSQL connection URL.")
+        return value
+
+    frontend_url: str
     frontend_public_url: str | None = None 
 
     smtp_host: str | None = None
-    smtp_port: int = 587
+    smtp_port: int | None = None
     smtp_username: str | None = None
     smtp_password: str | None = None
     smtp_from_email: str | None = None
     smtp_use_tls: bool = True
+    max_image_upload_size_mb: int = 5
 
     # Keep the legacy development key for local session compatibility, but never
     # permit it in a production deployment (validated below).
     jwt_secret_key: str = "development-only-change-this-secret"
-    app_env: str = "production"
+    app_env: str = "development"
     jwt_issuer: str = "dinebook-api"
     jwt_audience: str = "dinebook-web"
     jwt_expire_minutes: int = 60 * 24 * 7
     auth_cookie_secure: bool = False
     max_request_body_bytes: int = Field(default=20 * 1024 * 1024, ge=1024)
+    max_json_body_bytes: int = Field(default=1024 * 1024, ge=1024)
+    rate_limit_enabled: bool = True
     google_client_id: str | None = None
     google_client_secret: str | None = None
     cloudinary_cloud_name: str | None = None
@@ -34,6 +48,7 @@ class Settings(BaseSettings):
     razorpay_key_secret: str | None = None
     razorpay_webhook_secret: str | None = None
     razorpay_webhook_previous_secret: str | None = None
+    order_tax_percent: Decimal = Field(default=Decimal("18.00"), ge=0, le=100)
 
     model_config = SettingsConfigDict(
         # Resolve from the backend source directory so config works whether

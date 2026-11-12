@@ -3,7 +3,7 @@ import uuid
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -20,6 +20,14 @@ class RestaurantDocumentType(str, enum.Enum):
 
 class RestaurantDocument(Base):
     __tablename__ = "restaurant_documents"
+    __table_args__ = (
+        Index(
+            "ix_restaurant_documents_restaurant_type_created",
+            "restaurant_id",
+            "document_type",
+            "created_at",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

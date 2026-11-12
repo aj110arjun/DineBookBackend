@@ -1,8 +1,9 @@
 import uuid
 import enum
 from datetime import datetime, timezone
+from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, ForeignKeyConstraint, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Enum, ForeignKey, ForeignKeyConstraint, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship, synonym
 
@@ -41,7 +42,9 @@ Floor = RestaurantFloor
 class DiningTable(Base):
     __tablename__ = "dining_tables"
     __table_args__ = (
+        CheckConstraint("extra_hour_fee >= 0 AND extra_hour_fee <= 100000", name="ck_dining_tables_extra_hour_fee"),
         UniqueConstraint("floor_id", "table_number", name="uq_dining_tables_floor_number"),
+        UniqueConstraint("floor_id", "grid_row", "grid_col", name="uq_dining_tables_grid_position"),
         ForeignKeyConstraint(["floor_id", "restaurant_id"], ["restaurant_floors.id", "restaurant_floors.restaurant_id"], ondelete="RESTRICT", name="fk_dining_tables_floor_restaurant"),
     )
 
@@ -51,6 +54,9 @@ class DiningTable(Base):
     table_number: Mapped[str] = mapped_column(String(30), nullable=False)
     capacity: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     reservation_fee: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=250)
+    extra_hour_fee: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, default=Decimal("0.00"), server_default="0.00",
+    )
     seats = synonym("capacity")
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="available")
     table_type: Mapped[DiningTableType] = mapped_column(
@@ -67,3 +73,5 @@ class DiningTable(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     floor: Mapped[RestaurantFloor] = relationship(back_populates="tables")
+    grid_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    grid_col: Mapped[int | None] = mapped_column(Integer, nullable=True)

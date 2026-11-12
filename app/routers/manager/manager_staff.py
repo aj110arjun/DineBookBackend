@@ -1,0 +1,236 @@
+import uuid
+import secrets
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, EmailStr, Field, field_validator
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from datetime import datetime, timedelta, timezone
+
+from app.core.config import settings
+from app.core.email import send_branded_email
+from app.core.security import hash_password
+from app.db.database import get_db
+from app.models.user import AccountStatus, User, UserRole
+from app.models.restaurant import Restaurant
+from app.models.restaurant_staff import RestaurantStaff
+from app.routers.auth.manager_auth import current_manager
+
+
+CHEF_INVITE_LIFETIME = timedelta(days=5)
+router = APIRouter(prefix="/api/manager/staff", tags=["manager staff"])
+
+
+class ChefCreateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    email: EmailStr
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        value = " ".join(value.split())
+        if len(value) < 2:
+            raise ValueError("Name must contain at least 2 characters.")
+        if any(not (character.isalpha() or character.isspace() or character in "'-.") for character in value):
+            raise ValueError("Name may only contain letters, spaces, apostrophes, hyphens, and periods.")
+        return value
+
+
+class StaffMemberCreateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        value = " ".join(value.split())
+        if len(value) < 2:
+            raise ValueError("Name must contain at least 2 characters.")
+        if any(not (character.isalpha() or character.isspace() or character in "'-. ") for character in value):
+            raise ValueError("Name may only contain letters, spaces, apostrophes, hyphens, and periods.")
+        return value
+
+
+def chef_dict(chef: User) -> dict:
+    invite_status = None
+    if chef.chef_invite_expires_at is not None:
+        invite_status = "expired" if chef.chef_invite_expired else "pending"
+
+    return {
+        "id": str(chef.id),
+        "name": chef.name,
+        "email": chef.email,
+        "role": chef.role.value,
+        "status": chef.status.value,
+        "is_active": chef.is_active,
+        "invite_status": invite_status
+    }
+
+def staff_member_dict(member: RestaurantStaff) -> dict:
+    return {"id": str(member.id), "name": member.name, "created_at": member.created_at.isoformat()}
+
+
+def manager_restaurant_id(manager: User, db: Session):
+    restaurant_id = db.query(Restaurant.id).filter(Restaurant.manager_id == manager.id).scalar()
+    if restaurant_id is None:
+        raise HTTPException(status_code=404, detail="No restaurant is linked to this account.")
+    return restaurant_id
+
+
+def send_chef_credentials(email: str, name: str, password: str) -> None:
+    login_url = f"{settings.frontend_public_url or settings.frontend_url}/chef/login"
+    send_branded_email(
+        to=email, subject="Your DineBook chef account", title="Your chef account is ready",
+        intro=f"Hello {name}, your manager created a DineBook chef account for you.",
+        detail="Sign in with the email address below. For your security, you’ll be asked to change this temporary password when you first sign in.",
+        highlight_label="Temporary password", highlight_value=password,
+        action_label="Sign in to DineBook", action_url=login_url,
+        plain_text=(f"Hello {name},\n\nYour manager created a DineBook chef account for you.\n"
+                    f"Sign in at {login_url}\n\nEmail: {email}\nTemporary password: {password}\n\n"
+                    "You will be asked to change this password when you first sign in."),
+        error_detail="We couldn’t send the chef’s account email. Please try again.",
+    )
+    
+
+
+
+
+@router.get("")
+def list_staff(manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> list[dict]:
+    staff = db.query(User).filter(User.manager_id == manager.id, User.role == UserRole.CHEF).order_by(User.created_at.desc()).all()
+    return [chef_dict(chef) for chef in staff]
+
+
+@router.get("/members")
+def list_staff_members(manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> list[dict]:
+    restaurant_id = manager_restaurant_id(manager, db)
+    members = (
+        db.query(RestaurantStaff)
+        .filter(RestaurantStaff.restaurant_id == restaurant_id)
+        .order_by(func.lower(RestaurantStaff.name), RestaurantStaff.id)
+        .all()
+    )
+    return [staff_member_dict(member) for member in members]
+
+
+@router.post("/members", status_code=status.HTTP_201_CREATED)
+def add_staff_member(
+    payload: StaffMemberCreateRequest,
+    manager: User = Depends(current_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    member = RestaurantStaff(
+        restaurant_id=manager_restaurant_id(manager, db),
+        name=payload.name,
+    )
+    db.add(member)
+    db.commit()
+    db.refresh(member)
+    return staff_member_dict(member)
+
+
+@router.delete("/members/{member_id}")
+def remove_staff_member(
+    member_id: uuid.UUID,
+    manager: User = Depends(current_manager),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    restaurant_id = manager_restaurant_id(manager, db)
+    member = db.query(RestaurantStaff).filter(
+        RestaurantStaff.id == member_id,
+        RestaurantStaff.restaurant_id == restaurant_id,
+    ).first()
+    if member is None:
+        raise HTTPException(status_code=404, detail="Staff member not found.")
+    db.delete(member)
+    db.commit()
+    return {"message": "Staff member removed."}
+
+
+@router.post("", status_code=status.HTTP_201_CREATED)
+def create_chef(payload: ChefCreateRequest, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
+    email = str(payload.email).strip().lower()
+    if db.query(User.id).filter(User.email == email).first():
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+    temporary_password = secrets.token_urlsafe(12)
+    send_chef_credentials(email, payload.name, temporary_password)
+    chef = User(
+        name=payload.name,
+        email=email,
+        password_hash=hash_password(temporary_password),
+        role=UserRole.CHEF,
+        status=AccountStatus.ACTIVE,
+        is_active=True,
+        email_verified=True,
+        must_change_password=True,
+        chef_invite_expires_at=datetime.now(timezone.utc) + CHEF_INVITE_LIFETIME,
+        manager_id=manager.id,
+    )
+    db.add(chef)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="An account with this email already exists.") from exc
+    db.refresh(chef)
+    return chef_dict(chef)
+
+
+@router.delete("/{chef_id}")
+def deactivate_chef(chef_id: uuid.UUID, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict[str, str]:
+    chef = db.query(User).filter(User.id == chef_id, User.manager_id == manager.id, User.role == UserRole.CHEF).first()
+    if chef is None:
+        raise HTTPException(status_code=404, detail="Chef staff member not found.")
+    chef.is_active = False
+    chef.status = AccountStatus.INACTIVE
+    db.commit()
+    return {"message": "Chef account deactivated."}
+
+@router.post("/{chef_id}/resend-invitation")
+def resend_chef_invitation(chef_id: uuid.UUID, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict[str, str]:
+    chef = (
+        db.query(User)
+        .filter(
+            User.id == chef_id,
+            User.manager_id == manager.id,
+            User.role == UserRole.CHEF
+        )
+        .with_for_update()
+        .first()
+    )
+
+    if chef is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Chef Account not found."
+        )
+
+    if chef.status !=  AccountStatus.ACTIVE or not chef.is_active:
+        raise HTTPException(
+            status_code=400,
+            detail="This chef account is disabled."
+        )
+
+    if not chef.chef_invite_expired:
+        raise HTTPException(
+            status_code=400,
+            detail="Only expired invitations can be reissued."
+        )
+
+    temporary_password = secrets.token_urlsafe(12)
+    now = datetime.now(timezone.utc)
+    chef.password_hash = hash_password(temporary_password)
+    chef.password_changed_at = now
+    chef.must_change_password = True
+    chef.chef_invite_expires_at = now + CHEF_INVITE_LIFETIME
+
+    try:
+        db.flush()
+        send_chef_credentials(chef.email, chef.name, temporary_password)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return {"message": "A new invitation was emailed to the chef."}

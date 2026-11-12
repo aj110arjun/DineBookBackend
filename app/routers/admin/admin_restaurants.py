@@ -1,0 +1,245 @@
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
+from sqlalchemy import or_
+from sqlalchemy.orm import Session, selectinload
+
+from app.db.database import get_db
+from app.models.restaurant import Restaurant, RestaurantStatus
+from app.models.restaurant_document import RestaurantDocument
+from app.models.restaurant_hours import RestaurantHours
+from app.models.menu import Category, Food
+from app.models.user import User, UserRole
+from app.services.notifications import create_notification
+from app.services.menu_listing import menu_page
+from app.core.email import send_branded_email
+from app.routers.auth.admin_auth import current_admin
+
+
+router = APIRouter(prefix="/api/admin/restaurants", tags=["admin restaurants"])
+
+
+class SuspensionRequest(BaseModel):
+    reason: str = Field(default="", max_length=500)
+
+
+@router.post("/{restaurant_id}/suspend", response_model=dict)
+def suspend_restaurant(restaurant_id: uuid.UUID, payload: SuspensionRequest,
+                       admin: User = Depends(current_admin), db: Session = Depends(get_db)) -> dict:
+    record = db.query(Restaurant, User).join(User, User.id == Restaurant.manager_id).filter(
+        Restaurant.id == restaurant_id, User.role == UserRole.MANAGER
+    ).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Restaurant not found.")
+    restaurant, manager = record
+    if restaurant.status != RestaurantStatus.APPROVED:
+        raise HTTPException(status_code=409, detail="Only approved restaurants can be suspended.")
+    restaurant.status = RestaurantStatus.SUSPENDED
+    create_notification(db, manager, notification_type="restaurant.suspended", category="SYSTEM",
+        title="Restaurant temporarily suspended", message="Your restaurant access was suspended by platform administration.",
+        restaurant_id=restaurant.id, entity_type="restaurant", entity_id=restaurant.id,
+        action_url="/manager/pending", priority="CRITICAL", dedupe_key=f"restaurant:{restaurant.id}:suspended")
+    db.commit()
+    reason = payload.reason.strip() or "Please contact DineBook support for more information."
+    email_sent = False
+    try:
+        send_branded_email(to=manager.email, subject=f"{restaurant.name} has been suspended on DineBook",
+            title="Restaurant temporarily suspended", intro=f"Hello {manager.name},",
+            detail=f"{restaurant.name} is no longer visible to customers. Your manager and chef portal access is paused until the restaurant is resumed. Reason: {reason}",
+            plain_text=f"{restaurant.name} has been suspended. Reason: {reason}",
+            error_detail="Email delivery is unavailable.")
+        email_sent = True
+    except Exception:
+        pass
+    return {"id": str(restaurant.id), "status": restaurant.status.value, "email_sent": email_sent}
+
+
+@router.post("/{restaurant_id}/resume", response_model=dict)
+def resume_restaurant(restaurant_id: uuid.UUID, admin: User = Depends(current_admin),
+                     db: Session = Depends(get_db)) -> dict:
+    restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
+    if not restaurant:
+        raise HTTPException(status_code=404, detail="Restaurant not found.")
+    if restaurant.status != RestaurantStatus.SUSPENDED:
+        raise HTTPException(status_code=409, detail="Restaurant is not suspended.")
+    restaurant.status = RestaurantStatus.APPROVED
+    manager = db.query(User).filter_by(id=restaurant.manager_id).first()
+    if manager:
+        create_notification(db, manager, notification_type="restaurant.reactivated", category="SYSTEM",
+            title="Restaurant reactivated", message="Your restaurant access has been restored.",
+            restaurant_id=restaurant.id, entity_type="restaurant", entity_id=restaurant.id,
+            action_url="/manager/dashboard", dedupe_key=f"restaurant:{restaurant.id}:reactivated")
+    db.commit()
+    return {"id": str(restaurant.id), "status": restaurant.status.value}
+
+
+@router.get("")
+def list_restaurants(
+    admin: User = Depends(current_admin), db: Session = Depends(get_db),
+    page: int | None = Query(None, ge=1), page_size: int = Query(10, ge=1, le=100),
+    search: str = "", cuisine: str = "", location: str = "", status: str = "",
+    sort: str = Query("newest", pattern="^(newest|oldest|name)$"),
+):
+    query = db.query(Restaurant, User).join(User, User.id == Restaurant.manager_id).filter(
+        User.role == UserRole.MANAGER,
+        Restaurant.status.in_((RestaurantStatus.APPROVED, RestaurantStatus.SUSPENDED)),
+    )
+    if not isinstance(page, int):
+        records = query.order_by(Restaurant.created_at.desc()).all()
+    else:
+        options = query.with_entities(Restaurant.cuisine_type, Restaurant.city, Restaurant.state).distinct().all()
+        locations = sorted({", ".join(part for part in (city, state) if part) for _, city, state in options} - {""})
+        cuisines = sorted({c for c, _, _ in options if c})
+        if search.strip():
+            needle = f"%{search.strip()}%"
+            query = query.filter(or_(*(column.ilike(needle) for column in (
+                Restaurant.name, Restaurant.cuisine_type, Restaurant.city, Restaurant.state, User.name, User.email))))
+        if cuisine:
+            query = query.filter(Restaurant.cuisine_type == cuisine)
+        if location:
+            query = query.filter(or_(*( (Restaurant.city == city) & (Restaurant.state == state)
+                for _, city, state in options if ", ".join(part for part in (city, state) if part) == location)))
+        if status:
+            if status not in {"APPROVED", "SUSPENDED"}:
+                raise HTTPException(422, "Invalid restaurant status.")
+            query = query.filter(Restaurant.status == status)
+        total = query.count()
+        ordering = Restaurant.name.asc() if sort == "name" else (Restaurant.created_at.asc() if sort == "oldest" else Restaurant.created_at.desc())
+        records = query.order_by(ordering, Restaurant.id).offset((page - 1) * page_size).limit(page_size).all()
+    items = [
+        {
+            "id": str(restaurant.id),
+            "name": restaurant.name,
+            "cuisine_type": restaurant.cuisine_type,
+            "location": ", ".join(
+                part for part in (restaurant.city, restaurant.state) if part
+            ),
+            "status": restaurant.status.value,
+            "manager": {
+                "id": str(manager.id),
+                "name": manager.name,
+                "email": manager.email,
+            },
+            "created_at": restaurant.created_at,
+        }
+        for restaurant, manager in records
+    ]
+
+    if not isinstance(page, int):
+        return items
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "cuisines": cuisines, "locations": locations}
+
+
+@router.get("/{restaurant_id}/menu")
+def admin_restaurant_menu(restaurant_id: uuid.UUID, admin: User = Depends(current_admin), db: Session = Depends(get_db),
+    page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100), search: str = "",
+    category_id: uuid.UUID | None = None, availability: str = Query("ALL", pattern="^(ALL|AVAILABLE|UNAVAILABLE)$"),
+    sort: str = Query("name", pattern="^(name|name-desc|price-low|price-high)$")):
+    return menu_page(db, restaurant_id, page=page, page_size=page_size, search=search,
+                     category_id=category_id, availability=availability, sort=sort)
+
+
+@router.get("/{restaurant_id}", response_model=dict)
+def get_restaurant_details(
+    restaurant_id: uuid.UUID,
+    include_menu: bool = True,
+    admin: User = Depends(current_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    record = (
+        db.query(Restaurant, User)
+        .join(User, User.id == Restaurant.manager_id)
+        .filter(Restaurant.id == restaurant_id, User.role == UserRole.MANAGER)
+        .first()
+    )
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Restaurant not found.",
+        )
+
+    restaurant, manager = record
+    documents = (
+        db.query(RestaurantDocument)
+        .filter(RestaurantDocument.restaurant_id == restaurant.id)
+        .order_by(RestaurantDocument.created_at.asc())
+        .all()
+    )
+    hours = (
+        db.query(RestaurantHours)
+        .filter(RestaurantHours.restaurant_id == restaurant.id)
+        .all()
+    )
+    weekday_order = {
+        day: index
+        for index, day in enumerate(
+            ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+        )
+    }
+    hours.sort(key=lambda hour: weekday_order.get(hour.day_of_week.lower(), len(weekday_order)))
+    menu_categories = (
+        db.query(Category).options(selectinload(Category.foods).selectinload(Food.variants), selectinload(Category.foods).selectinload(Food.image))
+        .filter(Category.restaurant_id == restaurant.id, Category.deleted_at.is_(None))
+        .order_by(Category.display_order, Category.name).all() if include_menu else []
+    )
+
+    return {
+        "id": str(restaurant.id),
+        "name": restaurant.name,
+        "description": restaurant.description,
+        "cuisine_type": restaurant.cuisine_type,
+        "phone": restaurant.phone,
+        "email": restaurant.email,
+        "address": restaurant.address,
+        "city": restaurant.city,
+        "state": restaurant.state,
+        "pin_code": restaurant.pin_code,
+        "status": restaurant.status.value,
+        "created_at": restaurant.created_at,
+        "updated_at": restaurant.updated_at,
+        "manager": {
+            "id": str(manager.id),
+            "name": manager.name,
+            "email": manager.email,
+            "status": manager.status.value,
+            "is_active": manager.is_active,
+        },
+        "documents": [
+            {
+                "id": str(document.id),
+                "document_type": document.document_type.value,
+                "file_name": document.file_name,
+                "file_path": document.file_path,
+                "created_at": document.created_at,
+            }
+            for document in documents
+        ],
+        "menu": [
+            {
+                "id": str(category.id), "name": category.name, "is_active": category.is_active,
+                "foods": [
+                    {
+                        "id": str(food.id), "name": food.name, "description": food.description,
+                        "is_available": food.is_available,
+                        "restaurant_name": restaurant.name,
+                        "image_url": food.image.image_url if food.image else None,
+                        "variants": [{"id": str(item.id), "name": item.name, "price": float(item.price), "is_available": item.is_available} for item in food.variants if item.deleted_at is None],
+                    }
+                    for food in category.foods if food.deleted_at is None
+                ],
+            }
+            for category in menu_categories
+        ],
+        "hours": [
+            {
+                "day": hour.day_of_week,
+                "enabled": hour.enabled,
+                "opens": hour.open_time.strftime("%H:%M") if hour.open_time else None,
+                "closes": hour.close_time.strftime("%H:%M") if hour.close_time else None,
+                "periods": hour.periods if hour.periods is not None else ([{"opens": hour.open_time.strftime("%H:%M"), "closes": hour.close_time.strftime("%H:%M")}] if hour.enabled and hour.open_time and hour.close_time else []),
+            }
+            for hour in hours
+        ],
+    }

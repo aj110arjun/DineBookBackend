@@ -8,7 +8,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
-    Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -33,6 +33,7 @@ class Restaurant(Base):
     __table_args__ = (
         UniqueConstraint("manager_id", name="uq_restaurants_manager_id"),
         Index("ix_restaurants_status", "status"),
+        Index("ix_restaurants_status_created_at", "status", "created_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -92,15 +93,8 @@ class Restaurant(Base):
         nullable=True,
     )
 
-    capacity: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
-    )
-
-    tables: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
-    )
+    latitude: Mapped[float | None] = mapped_column(Numeric(10, 7), nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Numeric(10, 7), nullable=True)
 
     status: Mapped[RestaurantStatus] = mapped_column(
         Enum(RestaurantStatus, name="restaurant_status"),

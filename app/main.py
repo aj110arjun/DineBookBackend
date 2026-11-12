@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from app.core.config import settings
+from app.middleware import RequestGuardMiddleware
 from app.routers import (
     admin_auth_router,
     admin_managers_router,
@@ -20,13 +21,19 @@ from app.routers import (
     manager_menu_router,
     password_recovery_router,
 )
-from app.routers.dining import admin_router as admin_dining_router, chef_router as chef_dining_router, customer_router as customer_dining_router, manager_router as manager_dining_router
-from app.routers.reservations import customer_router as customer_reservations_router, manager_router as manager_reservations_router, chef_router as chef_reservations_router
-from app.routers.customer_auth import session_router
-from app.routers.wallet import customer_router as customer_wallet_router, admin_router as admin_wallet_router
-from app.routers.orders import customer_router as customer_orders_router, customer_reservation_orders_router, manager_router as manager_orders_router, manager_reservation_orders_router, chef_router as chef_orders_router, chef_reservation_orders_router, admin_router as admin_orders_router
-from app.routers.webhooks import router as webhooks_router
-from app.routers.realtime import router as realtime_router
+from app.routers.restaurants.dining import admin_router as admin_dining_router, chef_router as chef_dining_router, customer_router as customer_dining_router, manager_router as manager_dining_router
+from app.routers.restaurants.reservations import customer_router as customer_reservations_router, manager_router as manager_reservations_router, manager_calendar_router, chef_router as chef_reservations_router
+from app.routers.auth.customer_auth import session_router
+from app.routers.commerce.wallet import customer_router as customer_wallet_router, admin_router as admin_wallet_router, manager_router as manager_wallet_router, chef_wallet_router
+from app.routers.commerce.orders import customer_router as customer_orders_router, customer_reservation_orders_router, manager_router as manager_orders_router, manager_reservation_orders_router, chef_router as chef_orders_router, chef_reservation_orders_router, admin_router as admin_orders_router
+from app.routers.commerce.webhooks import router as webhooks_router
+from app.routers.commerce.payments import manager_router as manager_payments_router, admin_router as admin_payments_router, transactions_router as admin_transactions_router
+from app.routers.events.realtime import router as realtime_router
+from app.routers.events.notifications import router as notifications_router
+from app.routers.restaurants.operating_hours import admin_router as admin_operating_hours_router, chef_router as chef_operating_hours_router, customer_router as customer_operating_hours_router, manager_router as manager_operating_hours_router
+from app.routers.customer.customer_transactions import router as customer_transactions_router
+from app.routers.restaurants.reviews import customer_router as customer_reviews_router, public_router as public_reviews_router, chef_router as chef_reviews_router, manager_router as manager_reviews_router, admin_router as admin_reviews_router
+from app.routers.commerce.revenue import admin_router as admin_revenue_router, manager_router as manager_revenue_router, chef_router as chef_revenue_router
 
 
 app = FastAPI(title="DineBook API", version="0.1.0")
@@ -49,7 +56,7 @@ def apply_security_headers(response, request_id: str, duration_ms: float) -> Non
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     started_at = time.perf_counter()
-    request_id = str(uuid.uuid4())
+    request_id = getattr(request.state, "request_id", None) or str(uuid.uuid4())
     request.state.request_id = request_id
     method = request.method.upper()
     path = request.url.path
@@ -93,25 +100,44 @@ async def security_middleware(request: Request, call_next):
 
     response = await call_next(request)
     apply_security_headers(response, request_id, (time.perf_counter() - started_at) * 1000)
+    if path in {app.docs_url, app.swagger_ui_oauth2_redirect_url}:
+        # FastAPI's Swagger HTML loads its bundle/styles from jsDelivr and
+        # fetches the same-origin OpenAPI schema. Keep the API policy strict.
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "connect-src 'self'; img-src 'self' data: https://fastapi.tiangolo.com; "
+            "font-src 'self' data:; "
+            "base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+        )
     if path.startswith("/api/"):
-        response.headers.setdefault("Cache-Control", "no-store")
+        # Public restaurant discovery data is requested repeatedly during
+        # navigation. Allow a short private browser cache while keeping all
+        # account, order, payment, and manager/admin responses uncached.
+        is_public_restaurant_read = (
+            method in {"GET", "HEAD"}
+            and (path == "/api/customer/restaurants" or path.startswith("/api/customer/restaurants/"))
+        )
+        if is_public_restaurant_read:
+            response.headers.setdefault("Cache-Control", "private, max-age=15")
+        else:
+            response.headers.setdefault("Cache-Control", "no-store")
     return response
 
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
+app.add_middleware(RequestGuardMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-    settings.frontend_url,
-    *(
-        [settings.frontend_public_url]
-        if settings.frontend_public_url
-        else []
-    ),
-],
+        settings.frontend_url,
+        *([settings.frontend_public_url] if settings.frontend_public_url else []),
+    ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS", "PATCH", "DELETE"],
+    allow_methods=["GET", "HEAD", "POST", "PUT", "OPTIONS", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization", "Last-Event-ID"],
+    expose_headers=["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-Request-ID"],
 )
-app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 app.include_router(customer_auth_router)
 app.include_router(password_recovery_router)
@@ -131,8 +157,20 @@ app.include_router(customer_dining_router)
 app.include_router(admin_dining_router)
 app.include_router(customer_reservations_router)
 app.include_router(customer_wallet_router)
+app.include_router(customer_transactions_router)
+app.include_router(customer_reviews_router)
+app.include_router(public_reviews_router)
+app.include_router(chef_reviews_router)
+app.include_router(manager_reviews_router)
+app.include_router(admin_reviews_router)
 app.include_router(admin_wallet_router)
+app.include_router(manager_wallet_router)
+app.include_router(chef_wallet_router)
+app.include_router(admin_revenue_router)
+app.include_router(manager_revenue_router)
+app.include_router(chef_revenue_router)
 app.include_router(manager_reservations_router)
+app.include_router(manager_calendar_router)
 app.include_router(chef_reservations_router)
 app.include_router(customer_orders_router)
 app.include_router(customer_reservation_orders_router)
@@ -142,7 +180,15 @@ app.include_router(chef_orders_router)
 app.include_router(chef_reservation_orders_router)
 app.include_router(admin_orders_router)
 app.include_router(webhooks_router)
+app.include_router(manager_payments_router)
+app.include_router(admin_payments_router)
+app.include_router(admin_transactions_router)
 app.include_router(realtime_router)
+app.include_router(notifications_router)
+app.include_router(customer_operating_hours_router)
+app.include_router(manager_operating_hours_router)
+app.include_router(chef_operating_hours_router)
+app.include_router(admin_operating_hours_router)
 
 
 @app.get("/api/health", tags=["health"])

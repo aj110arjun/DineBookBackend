@@ -1,0 +1,323 @@
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
+from sqlalchemy import case, func, or_
+from sqlalchemy.orm import Session, selectinload
+
+from app.db.database import get_db
+from app.models.restaurant import Restaurant, RestaurantStatus
+from app.models.restaurant_document import RestaurantDocument, RestaurantDocumentType
+from app.models.restaurant_hours import RestaurantHours
+from app.models.menu import Category, Food
+from app.models.reviews import Review
+from app.services.menu_listing import menu_page
+
+
+router = APIRouter(prefix="/api/customer/restaurants", tags=["customer restaurants"])
+
+
+class NearbyRestaurantSearch(BaseModel):
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    search: str | None = Field(default=None, max_length=100)
+    cuisine: list[str] = Field(default_factory=list)
+    location: list[str] = Field(default_factory=list)
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=6, ge=1, le=100)
+
+
+@router.get("/{restaurant_id}/preorder-menu")
+def get_customer_preorder_menu(
+    restaurant_id: uuid.UUID, db: Session = Depends(get_db),
+    page: int = Query(1, ge=1), page_size: int = Query(8, ge=1, le=100),
+    search: str = Query("", max_length=100), category_id: uuid.UUID | None = None,
+    is_vegetarian: bool | None = None,
+    sort: str = Query("name", pattern="^(name|name-desc|price-low|price-high)$"),
+):
+    """Browse orderable foods across all categories, filtered before pagination."""
+    return menu_page(db, restaurant_id, page=page, page_size=page_size,
+                     search=search, category_id=category_id, is_vegetarian=is_vegetarian,
+                     sort=sort, public=True, preorder=True)
+
+
+@router.get("/{restaurant_id}/menu")
+def get_customer_restaurant_menu(restaurant_id: uuid.UUID, db: Session = Depends(get_db),
+    page: int | None = Query(None, ge=1), page_size: int = Query(8, ge=1, le=100),
+    search: str = "", category_id: uuid.UUID | None = None,
+    sort: str = Query("name", pattern="^(name|name-desc|price-low|price-high)$")):
+    if isinstance(page, int):
+        return menu_page(db, restaurant_id, page=page, page_size=page_size, search=search,
+                         category_id=category_id, sort=sort, public=True)
+    restaurant = db.query(Restaurant).filter(
+        Restaurant.id == restaurant_id,
+        Restaurant.status == RestaurantStatus.APPROVED,
+    ).first()
+    if restaurant is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Restaurant not found.")
+
+    categories = (
+        db.query(Category).options(selectinload(Category.foods).selectinload(Food.variants), selectinload(Category.foods).selectinload(Food.image))
+        .filter(
+            Category.restaurant_id == restaurant_id,
+            Category.is_active.is_(True),
+            Category.deleted_at.is_(None),
+        )
+        .order_by(Category.display_order, Category.name)
+        .all()
+    )
+    return [
+        {
+            "id": str(category.id),
+            "name": category.name,
+            "description": category.description,
+            "foods": [
+                {
+                    "id": str(food.id),
+                    "name": food.name,
+                    "description": food.description,
+                    "is_available": food.is_available,
+                    "restaurant_name": restaurant.name,
+                    "image_url": food.image.image_url if food.image else None,
+                    "variants": [
+                        {"id": str(variant.id), "name": variant.name, "price": float(variant.price), "is_available": variant.is_available}
+                        for variant in food.variants if variant.deleted_at is None
+                    ],
+                }
+                for food in sorted(category.foods, key=lambda food: food.name.lower())
+                if food.deleted_at is None
+            ],
+        }
+        for category in categories
+    ]
+
+
+@router.get("")
+def list_customer_restaurants(
+    search: str | None = Query(default=None, max_length=100),
+    cuisine: list[str] = Query(default=[]),
+    location: list[str] = Query(default=[]),
+    sort: str = Query(default="newest", pattern="^(newest|name|name-desc|distance)$"),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+    latitude: float | None = Query(default=None, ge=-90, le=90),
+    longitude: float | None = Query(default=None, ge=-180, le=180),
+    db: Session = Depends(get_db),
+) -> dict | list[dict]:
+    if (latitude is None) != (longitude is None):
+        raise HTTPException(status_code=422, detail="Latitude and longitude must be provided together.")
+    if sort == "distance" and latitude is None:
+        raise HTTPException(status_code=422, detail="Your location is required to sort by distance.")
+
+    base_query = db.query(Restaurant).filter(Restaurant.status == RestaurantStatus.APPROVED)
+    # Keep the unparameterized response compatible with existing callers such as
+    # the landing page and profile. The directory requests paginated results.
+    legacy_call = not any((search, cuisine, location, page, page_size, latitude, longitude)) and sort == "newest"
+    page = page or 1
+    page_size = page_size or 6
+
+    cuisine_values = [value.strip() for value in cuisine if value.strip()]
+    location_values = [value.strip() for value in location if value.strip()]
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        base_query = base_query.filter(or_(
+            Restaurant.name.ilike(term), Restaurant.cuisine_type.ilike(term),
+            Restaurant.city.ilike(term), Restaurant.state.ilike(term),
+        ))
+    if cuisine_values:
+        base_query = base_query.filter(func.coalesce(Restaurant.cuisine_type, "Restaurant").in_(cuisine_values))
+    if location_values:
+        location_filters = []
+        for value in location_values:
+            parts = [part.strip() for part in value.split(",", 1)]
+            if len(parts) == 2:
+                location_filters.append((Restaurant.city == parts[0]) & (func.coalesce(Restaurant.state, "") == parts[1]))
+            else:
+                location_filters.append(Restaurant.city == parts[0])
+        base_query = base_query.filter(or_(*location_filters))
+
+    if sort == "distance":
+        base_query = base_query.filter(
+            Restaurant.latitude.is_not(None),
+            Restaurant.longitude.is_not(None),
+        )
+    total = base_query.count()
+    if sort == "name":
+        base_query = base_query.order_by(func.lower(Restaurant.name), Restaurant.id)
+    elif sort == "name-desc":
+        base_query = base_query.order_by(func.lower(Restaurant.name).desc(), Restaurant.id)
+    elif sort == "distance":
+        user_latitude = func.radians(latitude)
+        latitude_delta = func.radians(Restaurant.latitude - latitude)
+        longitude_delta = func.radians(Restaurant.longitude - longitude)
+        haversine_a = (
+            func.power(func.sin(latitude_delta / 2.0), 2)
+            + func.cos(user_latitude)
+            * func.cos(func.radians(Restaurant.latitude))
+            * func.power(func.sin(longitude_delta / 2.0), 2)
+        )
+        haversine_a = func.least(1.0, func.greatest(0.0, haversine_a))
+        distance_expression = case(
+            (Restaurant.latitude.is_(None) | Restaurant.longitude.is_(None), None),
+            else_=6371.0 * 2.0 * func.asin(func.sqrt(haversine_a)),
+        )
+        base_query = base_query.order_by(distance_expression.asc().nulls_last(), Restaurant.id)
+    else:
+        distance_expression = None
+        base_query = base_query.order_by(Restaurant.created_at.desc(), Restaurant.id)
+    if not legacy_call:
+        base_query = base_query.offset((page - 1) * page_size).limit(page_size)
+    # Select only fields used by the response and fetch each restaurant's first
+    # branding image via an indexed scalar subquery. This avoids loading every
+    # ORM column plus all historical branding documents for the page.
+    first_branding_image = (
+        db.query(RestaurantDocument.file_path)
+        .filter(
+            RestaurantDocument.restaurant_id == Restaurant.id,
+            RestaurantDocument.document_type == RestaurantDocumentType.BRANDING_IMAGE,
+        )
+        .order_by(RestaurantDocument.created_at.asc(), RestaurantDocument.id.asc())
+        .limit(1)
+        .correlate(Restaurant)
+        .scalar_subquery()
+    )
+    selected_columns = [
+        Restaurant.id,
+        Restaurant.name,
+        Restaurant.description,
+        Restaurant.cuisine_type,
+        Restaurant.city,
+        Restaurant.state,
+        Restaurant.address,
+        Restaurant.status,
+        Restaurant.created_at,
+        first_branding_image.label("image"),
+    ]
+    if sort == "distance":
+        selected_columns.append(distance_expression.label("distance_km"))
+    restaurant_rows = base_query.with_entities(*selected_columns).all()
+    restaurant_ids = [row.id for row in restaurant_rows]
+    review_averages = {}
+    if restaurant_ids:
+        review_averages = {
+            restaurant_id: (round(float(average), 1), count)
+            for restaurant_id, average, count in db.query(
+                Review.restaurant_id, func.avg(Review.rating), func.count(Review.id)
+            ).filter(
+                Review.restaurant_id.in_(restaurant_ids), Review.status == "PUBLISHED"
+            ).group_by(Review.restaurant_id).all()
+        }
+    items = []
+    for row in restaurant_rows:
+        rating, review_count = review_averages.get(row.id, (None, 0))
+        item = {
+            "id": str(row.id),
+            "name": row.name,
+            "description": row.description,
+            "cuisine": row.cuisine_type or "Restaurant",
+            "location": ", ".join(
+                part for part in (row.city, row.state) if part
+            ),
+            "address": row.address,
+            "status": row.status.value,
+            "image": row.image,
+            "created_at": row.created_at,
+            "rating": rating,
+            "review_count": review_count,
+        }
+        if sort == "distance":
+            item["distance_km"] = round(float(row.distance_km), 2) if row.distance_km is not None else None
+        items.append(item)
+    if legacy_call:
+        return items
+    # Facets come from the full approved set so options remain available even
+    # when the current result page does not contain every cuisine or city.
+    approved = Restaurant.status == RestaurantStatus.APPROVED
+    cuisine_rows = db.query(Restaurant.cuisine_type).filter(approved).distinct().all()
+    location_rows = db.query(Restaurant.city, Restaurant.state).filter(approved).distinct().all()
+    cuisines = sorted({row[0] or "Restaurant" for row in cuisine_rows}, key=str.lower)
+    locations = sorted({", ".join(part for part in row if part) for row in location_rows if row[0] or row[1]}, key=str.lower)
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "cuisines": cuisines, "locations": locations}
+
+
+@router.post("/nearby")
+def list_nearby_customer_restaurants(
+    payload: NearbyRestaurantSearch,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return a paginated restaurant directory ordered by distance from the customer."""
+    return list_customer_restaurants(
+        search=payload.search,
+        cuisine=payload.cuisine,
+        location=payload.location,
+        sort="distance",
+        page=payload.page,
+        page_size=payload.page_size,
+        latitude=payload.latitude,
+        longitude=payload.longitude,
+        db=db,
+    )
+
+
+@router.get("/{restaurant_id}", response_model=dict)
+def get_customer_restaurant(restaurant_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
+    restaurant = (
+        db.query(Restaurant)
+        .filter(
+            Restaurant.id == restaurant_id,
+            Restaurant.status == RestaurantStatus.APPROVED,
+        )
+        .first()
+    )
+    if restaurant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Restaurant not found.",
+        )
+
+    images = (
+        db.query(RestaurantDocument.file_path)
+        .filter(
+            RestaurantDocument.restaurant_id == restaurant.id,
+            RestaurantDocument.document_type == RestaurantDocumentType.BRANDING_IMAGE,
+        )
+        .order_by(RestaurantDocument.created_at.asc())
+        .all()
+    )
+    hours = (
+        db.query(RestaurantHours)
+        .filter(RestaurantHours.restaurant_id == restaurant.id)
+        .all()
+    )
+    weekday_order = {
+        day: index
+        for index, day in enumerate(
+            ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+        )
+    }
+    hours.sort(key=lambda hour: weekday_order.get(hour.day_of_week.lower(), len(weekday_order)))
+    return {
+        "id": str(restaurant.id),
+        "name": restaurant.name,
+        "description": restaurant.description,
+        "cuisine": restaurant.cuisine_type or "Restaurant",
+        "email": restaurant.email,
+        "phone": restaurant.phone,
+        "address": restaurant.address,
+        "city": restaurant.city,
+        "state": restaurant.state,
+        "pin_code": restaurant.pin_code,
+        "image": images[0][0] if images else None,
+        "images": [image[0] for image in images],
+        "hours": [
+            {
+                "day": hour.day_of_week,
+                "enabled": hour.enabled,
+                "opens": hour.open_time.strftime("%H:%M") if hour.open_time else None,
+                "closes": hour.close_time.strftime("%H:%M") if hour.close_time else None,
+                "periods": hour.periods if hour.periods is not None else ([{"opens": hour.open_time.strftime("%H:%M"), "closes": hour.close_time.strftime("%H:%M")}] if hour.enabled and hour.open_time and hour.close_time else []),
+            }
+            for hour in hours
+        ],
+    }
