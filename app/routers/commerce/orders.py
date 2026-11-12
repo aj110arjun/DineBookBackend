@@ -21,7 +21,7 @@ from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.user import User
 from app.models.wallet import WalletAccount, WalletTransaction
 from app.models.realtime import RealtimeEvent
-from app.services.notifications import notify_order_status
+from app.services.notifications import notify_order_status, notify_wallet_transaction
 from app.services.restaurant_wallet import record_restaurant_payment, reverse_restaurant_payment
 from app.routers.auth.admin_auth import current_admin
 from app.routers.auth.chef_auth import current_chef
@@ -99,7 +99,7 @@ def utc_instant(value: datetime | None) -> datetime | None:
 def calculate_offer_discount(offer: FoodOrderOffer, eligible_subtotal: Decimal) -> Decimal:
     """Calculate one offer against the deduplicated eligible merchandise subtotal."""
     base = Decimal(eligible_subtotal).quantize(CENT, rounding=ROUND_HALF_UP)
-    raw = base * Decimal(offer.discount_percent) / Decimal("100") if offer.discount_type == "PERCENTAGE" else Decimal(offer.discount_percent)
+    raw = base * Decimal(offer.discount_percent) / Decimal("100.00") if offer.discount_type == "PERCENTAGE" else Decimal(offer.discount_percent)
     if offer.max_discount is not None:
         raw = min(raw, Decimal(offer.max_discount))
     return min(raw, base).quantize(CENT, rounding=ROUND_HALF_UP)
@@ -180,6 +180,7 @@ class SpotOrderInput(SpotOrderPreviewInput):
 class StatusInput(BaseModel):
     status: str = Field(pattern="^(ACCEPTED|PREPARING|READY|SERVED|COMPLETED|CANCELLED|REJECTED)$")
     reason: str | None = Field(default=None, max_length=500)
+    desk_refund_confirmed: bool = False
 
     @field_validator("reason")
     @classmethod
@@ -304,6 +305,7 @@ def serialize(order: FoodOrder, db: Session) -> dict:
         "id": str(order.id), "reservation_id": str(order.reservation_id) if order.reservation_id else None,
         "is_preorder": is_preorder, "can_customer_cancel": can_customer_cancel_order(order),
         "order_source": "PREORDER" if is_preorder else ("RESERVATION" if order.reservation_id else "SPOT" if order.table_id else "WALK_IN"),
+        "service_type": order.service_type,
         "reservation": ({"id": str(reservation.id), "status": reservation.status,
             "reservation_date": reservation.reservation_date.isoformat(),
             "start_time": reservation.start_time.strftime("%H:%M"),
@@ -317,7 +319,6 @@ def serialize(order: FoodOrder, db: Session) -> dict:
                     "floor_name": table.floor.floor_name if table.floor else None} for table in assigned_tables],
         "restaurant_id": str(order.restaurant_id),
         "table_id": str(order.table_id) if order.table_id else None,
-        "service_type": order.service_type,
         "restaurant_name": restaurant.name if restaurant else "Restaurant",
         "restaurant_location": ", ".join(part for part in (restaurant.city, restaurant.state) if part) if restaurant else None,
         "restaurant_address": restaurant.address if restaurant else None,
@@ -414,12 +415,12 @@ def create_reserved_order(reservation_id: uuid.UUID, payload: CheckoutInput, cus
                     eligible_ids.add(variant_id)
             eligible_subtotal = sum((Decimal(by_id[vid].price) * quantities[vid] for vid in eligible_ids), Decimal("0.00")).quantize(CENT, rounding=ROUND_HALF_UP)
             customer_uses = customer_offer_uses(db, offer.id, customer.id) if offer else 0
-            if (offer is None or (offer.starts_at and utc_instant(offer.starts_at) > now)
-                    or (offer.ends_at and utc_instant(offer.ends_at) < now)
-                    or (offer.max_uses is not None and offer.uses >= offer.max_uses)
-                    or (offer.per_customer_limit is not None and customer_uses >= offer.per_customer_limit)
-                    or eligible_subtotal < Decimal(offer.minimum_subtotal)
-                    or (offer.applicability != "RESTAURANT" and not eligible_ids)):
+            if (offer is None or (offer.starts_at and (utc_instant(offer.starts_at) or now) > now)
+                or (offer.ends_at and (utc_instant(offer.ends_at) or now) < now)
+                or (offer.max_uses is not None and offer.uses >= offer.max_uses)
+                or (offer.per_customer_limit is not None and customer_uses >= offer.per_customer_limit)
+                or eligible_subtotal < Decimal(offer.minimum_subtotal)
+                or (offer.applicability != "RESTAURANT" and not eligible_ids)):
                 raise HTTPException(status_code=422, detail="This offer is invalid, expired, exhausted, or does not match your eligible cart subtotal.")
             discount = calculate_offer_discount(offer, eligible_subtotal)
             offer.uses += 1
@@ -695,8 +696,8 @@ def paginated_orders(query, params: OrderListParams, db: Session) -> dict:
         calendar_query = calendar_query.filter(visit_date >= params.calendar_from)
     if params.calendar_to:
         calendar_query = calendar_query.filter(visit_date <= params.calendar_to)
-    calendar_counts = {}
-    calendar_statuses = {}
+    calendar_counts: dict[str, int] = {}
+    calendar_statuses: dict[str, list[str]] = {}
     for day, status, count in calendar_query.with_entities(visit_date, FoodOrder.status, func.count(FoodOrder.id)).group_by(visit_date, FoodOrder.status).all():
         key = str(day)
         calendar_counts[key] = calendar_counts.get(key, 0) + count
@@ -721,7 +722,8 @@ def paginated_orders(query, params: OrderListParams, db: Session) -> dict:
     total, guests = query.with_entities(func.count(FoodOrder.id), func.coalesce(func.sum(Reservation.number_of_guests), 0)).one()
     ordering = {"newest": FoodOrder.created_at.desc(), "oldest": FoodOrder.created_at.asc(),
                 "amount-low": FoodOrder.total.asc(), "amount-high": FoodOrder.total.desc()}[params.sort]
-    rows = query.order_by(ordering, FoodOrder.id).offset((params.page - 1) * params.page_size).limit(params.page_size).all()
+    page = params.page if params.page is not None else 1
+    rows = query.order_by(ordering, FoodOrder.id).offset((page - 1) * params.page_size).limit(params.page_size).all()
     return {"items": [serialize(row, db) for row in rows], "total": total, "guests": guests,
             "page": params.page, "page_size": params.page_size, "calendar_counts": calendar_counts, "calendar_statuses": calendar_statuses}
 
@@ -770,8 +772,16 @@ def list_for_staff(staff: User, db: Session) -> list[dict]:
     return [serialize(row, db) for row in rows]
 
 
+def release_order_table(db: Session, order: FoodOrder) -> None:
+    table = db.query(DiningTable).filter(
+        DiningTable.id == order.table_id, DiningTable.restaurant_id == order.restaurant_id,
+    ).with_for_update().first()
+    if table is not None and table.status == "occupied":
+        table.status = "available"
+
+
 def update_status(order_id: uuid.UUID, next_status: str, allowed: dict, staff: User, db: Session,
-                  reason: str | None = None) -> dict:
+                  reason: str | None = None, *, desk_refund_confirmed: bool = False) -> dict:
     restaurant = staff_restaurant(staff, db)
     row = db.query(FoodOrder).filter(FoodOrder.id == order_id, FoodOrder.restaurant_id == restaurant.id).with_for_update().first()
     if row is None:
@@ -779,9 +789,21 @@ def update_status(order_id: uuid.UUID, next_status: str, allowed: dict, staff: U
     if next_status not in allowed.get(row.status, set()):
         raise HTTPException(status_code=409, detail=f"Order cannot move from {row.status} to {next_status}.")
     previous_status = row.status
-    if next_status in {"CANCELLED", "REJECTED"}:
+    cancelling = next_status in {"CANCELLED", "REJECTED"}
+    refund_at_desk = (cancelling and row.payment_status == "PAID"
+                      and row.payment_method == "PAY_AT_DESK" and row.customer_id is None)
+    if refund_at_desk and not desk_refund_confirmed:
+        raise HTTPException(status_code=409, detail="Confirm the guest was refunded at the desk.")
+    if cancelling:
+        if row.table_id is not None and row.reservation_id is None:
+            # Spot checkout locks the table before checking the offer.
+            release_order_table(db, row)
         reverse_offer_redemption(db, row)
-    if next_status in {"CANCELLED", "REJECTED"} and row.payment_status == "PAID":
+    if refund_at_desk:
+        reverse_restaurant_payment(db, row.restaurant_id, Decimal(row.total),
+            f"Desk refund · ORD-{row.id.hex[:8].upper()}", f"customer-refund:order:{row.id}", debit_gross=False)
+        row.payment_status = "REFUNDED"
+    elif cancelling and row.payment_status == "PAID":
         is_preorder = row.reservation_id is not None and row.idempotency_key == uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(row.reservation_id))
         if is_preorder:
             reservation = db.query(Reservation).filter(Reservation.id == row.reservation_id).with_for_update().first()
@@ -822,10 +844,8 @@ def update_status(order_id: uuid.UUID, next_status: str, allowed: dict, staff: U
     elif next_status == "COMPLETED":
         row.completed_at = now
         if row.table_id and row.payment_status == "PAID":
-            table = db.query(DiningTable).filter(DiningTable.id == row.table_id).with_for_update().first()
-            if table is not None and table.status == "occupied":
-                table.status = "available"
-    if next_status in {"CANCELLED", "REJECTED"}:
+            release_order_table(db, row)
+    if cancelling:
         row.status_reason = reason.strip() if reason and reason.strip() else None
     record_order_event(db, row, previous_status, staff, reason)
     db.commit()
@@ -876,8 +896,8 @@ def spot_order_totals(payload: SpotOrderPreviewInput, restaurant_id: uuid.UUID, 
         ).with_for_update().first()
         now = datetime.now(timezone.utc)
         if (offer is None or not offer.is_active
-                or (offer.starts_at and utc_instant(offer.starts_at) > now)
-                or (offer.ends_at and utc_instant(offer.ends_at) < now)
+                or (offer.starts_at and (utc_instant(offer.starts_at) or now) > now)
+                or (offer.ends_at and (utc_instant(offer.ends_at) or now) < now)
                 or (offer.max_uses is not None and offer.uses >= offer.max_uses)):
             raise HTTPException(status_code=422, detail="This offer is invalid, expired, or fully redeemed.")
         if offer.per_customer_limit is not None:
@@ -964,11 +984,20 @@ def manager_create_spot_order(payload: SpotOrderInput, manager: User = Depends(c
                     detail="This table is not available for a spot order.",
                 )
         totals, offer = spot_order_totals(payload, restaurant_id, db)
-        order = FoodOrder(customer_id=None, guest_name=payload.guest_name, service_type=payload.service_type,
+        order = FoodOrder(
+            customer_id=None,
+            guest_name=payload.guest_name,
+            service_type=payload.service_type,
             table_id=table.id if table is not None else None,
-            restaurant_id=restaurant_id, idempotency_key=payload.idempotency_key, **totals, status="ACCEPTED",
-            payment_method="PAY_AT_DESK", payment_status="PENDING", customer_note=payload.customer_note,
-            accepted_at=datetime.now(timezone.utc))
+            restaurant_id=restaurant_id,
+            idempotency_key=payload.idempotency_key,
+            **totals,
+            status="ACCEPTED",
+            accepted_at=datetime.now(timezone.utc),
+            payment_method="PAY_AT_DESK",
+            payment_status="PENDING",
+            customer_note=payload.customer_note,
+        )
         if table is not None:
             table.status = "occupied"
         db.add(order)
@@ -997,7 +1026,8 @@ def manager_create_spot_order(payload: SpotOrderInput, manager: User = Depends(c
 
 @manager_router.patch("/{order_id}/status")
 def manager_update_order(order_id: uuid.UUID, payload: StatusInput, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
-    return update_status(order_id, payload.status, MANAGER_TRANSITIONS, manager, db, payload.reason)
+    return update_status(order_id, payload.status, MANAGER_TRANSITIONS, manager, db, payload.reason,
+                         desk_refund_confirmed=payload.desk_refund_confirmed)
 
 
 @manager_router.post("/{order_id}/mark-paid")
@@ -1016,9 +1046,7 @@ def manager_mark_order_paid(order_id: uuid.UUID, manager: User = Depends(current
         f"Food order ORD-{row.id.hex[:8].upper()} · Desk",
         f"customer-payment:order:{row.id}", credit_gross=False, occurred_at=row.paid_at)
     if row.table_id is not None and row.status == "COMPLETED":
-        table = db.query(DiningTable).filter(DiningTable.id == row.table_id).with_for_update().first()
-        if table is not None and table.status == "occupied":
-            table.status = "available"
+        release_order_table(db, row)
     if row.reservation_id is not None and row.idempotency_key == uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(row.reservation_id)):
         reservation = db.query(Reservation).filter(Reservation.id == row.reservation_id).with_for_update().first()
         if reservation is not None:
@@ -1118,8 +1146,8 @@ def create_offer(payload: OfferInput, manager: User = Depends(current_manager), 
     if payload.ends_at and payload.starts_at and payload.ends_at <= payload.starts_at:
         raise HTTPException(status_code=422, detail="Offer end time must be after its start time.")
     validate_offer_scope(db, restaurant.id, payload)
-    if db.query(FoodOrderOffer.id).filter(func.upper(FoodOrderOffer.code) == code).first():
-        raise HTTPException(status_code=409, detail="That offer code already exists.")
+    if db.query(FoodOrderOffer.id).filter(FoodOrderOffer.restaurant_id == restaurant.id, func.upper(FoodOrderOffer.code) == code).first():
+        raise HTTPException(status_code=409, detail="That offer code already exists for your restaurant. Choose another code.")
     row = FoodOrderOffer(restaurant_id=restaurant.id)
     apply_offer_input(row, payload)
     db.add(row)
@@ -1127,7 +1155,7 @@ def create_offer(payload: OfferInput, manager: User = Depends(current_manager), 
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=409, detail="An offer with that code already exists.")
+        raise HTTPException(status_code=409, detail="That offer code already exists for your restaurant. Choose another code.")
     db.refresh(row)
     return offer_data(row)
 
@@ -1139,8 +1167,8 @@ def update_offer(offer_id: uuid.UUID, payload: OfferInput, manager: User = Depen
     if row is None: raise HTTPException(status_code=404, detail="Offer not found.")
     if payload.ends_at and payload.starts_at and payload.ends_at <= payload.starts_at:
         raise HTTPException(status_code=422, detail="Offer end time must be after its start time.")
-    conflict = db.query(FoodOrderOffer.id).filter(func.upper(FoodOrderOffer.code) == payload.code.strip().upper(), FoodOrderOffer.id != row.id).first()
-    if conflict: raise HTTPException(status_code=409, detail="That offer code already exists.")
+    conflict = db.query(FoodOrderOffer.id).filter(FoodOrderOffer.restaurant_id == restaurant.id, func.upper(FoodOrderOffer.code) == payload.code.strip().upper(), FoodOrderOffer.id != row.id).first()
+    if conflict: raise HTTPException(status_code=409, detail="That offer code already exists for your restaurant. Choose another code.")
     if payload.max_uses is not None and payload.max_uses < row.uses:
         raise HTTPException(status_code=409, detail="The redemption limit cannot be lower than the number already used.")
     validate_offer_scope(db, restaurant.id, payload)

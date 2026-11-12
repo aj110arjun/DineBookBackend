@@ -45,7 +45,7 @@ def build_reservation_pass_png(item, restaurant, customer, tables, reservation_c
     has_preorder = item.fulfillment_type == "PREORDER" and bool(item.preorder_items)
     rows = [
         ("Reservation code", reservation_code, True),
-        ("Date and time", f"{item.reservation_date.isoformat()} · {item.start_time.strftime('%I:%M %p').lstrip('0')}", False),
+        ("Date and time", f"{item.reservation_date.strftime('%d %B %Y')} · {item.start_time.strftime('%I:%M %p').lstrip('0')}", False),
         ("Guests", item.number_of_guests, False),
         ("Table", ", ".join(f"{table.floor.floor_name if table.floor else 'Dining area'} · {table.table_number}" for table in tables) or "Assignment pending", False),
         ("Reservation fee", _money(item.fee_amount), True),

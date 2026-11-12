@@ -308,8 +308,6 @@ def get_customer_restaurant(restaurant_id: uuid.UUID, db: Session = Depends(get_
         "city": restaurant.city,
         "state": restaurant.state,
         "pin_code": restaurant.pin_code,
-        "capacity": restaurant.capacity,
-        "tables": restaurant.tables,
         "image": images[0][0] if images else None,
         "images": [image[0] for image in images],
         "hours": [

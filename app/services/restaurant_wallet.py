@@ -102,8 +102,8 @@ def record_restaurant_payment(db: Session, restaurant_id: uuid.UUID, amount: Dec
 
 
 def reverse_restaurant_payment(db: Session, restaurant_id: uuid.UUID, amount: Decimal,
-                               description: str, reference: str) -> None:
-    """Reverse one full payment component, including its settled commission."""
+                               description: str, reference: str, *, debit_gross: bool = True) -> None:
+    """Reverse settled commission and debit gross funds when the wallet funds the refund."""
     amount = money(amount)
     if amount <= 0:
         return
@@ -122,6 +122,7 @@ def reverse_restaurant_payment(db: Session, restaurant_id: uuid.UUID, amount: De
         return
     if record is not None:
         reverse_payment_commission(db, record)
-    account = locked_wallets(db, [manager_id])[manager_id]
-    record_wallet_entry(db, account, -amount, description, reference)
-    db.flush()
+    if debit_gross:
+        account = locked_wallets(db, [manager_id])[manager_id]
+        record_wallet_entry(db, account, -amount, description, reference)
+        db.flush()

@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.core.cloudinary import delete_file, upload_file
 from app.core.config import settings
 from app.core.email import send_branded_email
+from app.core.phone import get_restaurant_phone_error
 from app.core.security import (
     create_access_token,
     decode_access_token,
@@ -241,9 +242,6 @@ async def register_manager(
     latitude: float | None = Form(None, ge=-90, le=90),
     longitude: float | None = Form(None, ge=-180, le=180),
 
-    capacity: int = Form(..., gt=0),
-    tables: int = Form(..., gt=0),
-
     monday_enabled: bool = Form(False),
     monday_open: str = Form("17:00"),
     monday_close: str = Form("22:00"),
@@ -322,16 +320,9 @@ async def register_manager(
         raise HTTPException(status_code=400, detail="Restaurant name may only contain letters, numbers, spaces, apostrophes, hyphens, and periods.")
     if len(restaurant_description) > 2000:
         raise HTTPException(status_code=400, detail="Restaurant description cannot exceed 2000 characters.")
-    phone_digits = re.findall(r"[0-9]", restaurant_contact)
-    if (
-        not 7 <= len(restaurant_contact) <= 20
-        or not 7 <= len(phone_digits) <= 15
-        or not re.fullmatch(r"\+?(?:[0-9]|\([0-9]+\))(?:[ -]?(?:[0-9]|\([0-9]+\)))*", restaurant_contact)
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Enter 7–15 digits. A leading +, spaces, hyphens, and parentheses are allowed (20 characters max).",
-        )
+    phone_error = get_restaurant_phone_error(restaurant_contact)
+    if phone_error:
+        raise HTTPException(status_code=400, detail=phone_error)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 -]{1,18}[A-Za-z0-9]", pin_code):
         raise HTTPException(status_code=400, detail="Enter a valid PIN or ZIP code.")
 
@@ -402,8 +393,6 @@ async def register_manager(
         pin_code=pin_code,
         latitude=latitude,
         longitude=longitude,
-        capacity=capacity,
-        tables=tables,
         status=RestaurantStatus.PENDING,
     )
 

@@ -22,7 +22,8 @@ from app.models.user import User, UserRole
 from app.models.wallet import WalletAccount
 from app.routers.commerce.orders import (
     existing_spot_order, manager_create_spot_order, OrderLineInput, SpotOrderInput,
-    CHEF_TRANSITIONS, MANAGER_TRANSITIONS, manager_mark_order_paid, update_status,
+    CHEF_TRANSITIONS, MANAGER_TRANSITIONS, StatusInput, manager_mark_order_paid,
+    manager_update_order, update_status,
 )
 
 
@@ -224,6 +225,43 @@ class GuestOrderIdempotencyTests(unittest.TestCase):
                 with self.assertRaises(IntegrityError):
                     self.db.flush()
                 self.db.rollback()
+
+    def test_cancelled_unpaid_spot_order_releases_table(self):
+        table = self.table()
+        created = self.create(self.payload(table))
+        manager = self.db.get(User, self.restaurant.manager_id)
+        cancelled = manager_update_order(uuid.UUID(created['id']),
+            StatusInput(status='CANCELLED', reason='Guest left'), manager, self.db)
+        self.assertEqual(cancelled['status'], 'CANCELLED')
+        self.assertEqual(table.status, 'available')
+        self.assertNotEqual(self.create(self.payload(table))['id'], created['id'])
+
+    def test_paid_guest_cancellation_records_confirmed_desk_refund(self):
+        manager = self.db.get(User, self.restaurant.manager_id)
+        admin = User(name='Admin', email='desk-refund-admin@example.test', password_hash='x', role=UserRole.ADMIN)
+        manager_wallet = WalletAccount(user_id=manager.id, balance=1000)
+        self.db.add_all([admin, manager_wallet])
+        self.db.commit()
+        table = self.table()
+        order_id = uuid.UUID(self.create(self.payload(table))['id'])
+        manager_mark_order_paid(order_id, manager, self.db)
+
+        payload = StatusInput(status='CANCELLED', reason='Guest left')
+        with self.assertRaises(HTTPException) as rejected:
+            manager_update_order(order_id, payload, manager, self.db)
+        self.assertEqual(rejected.exception.status_code, 409)
+        self.assertEqual(table.status, 'occupied')
+        self.assertIsNone(self.db.query(PlatformCommission).one().refunded_at)
+        self.db.rollback()
+
+        confirmed = StatusInput(status='CANCELLED', reason='Guest left', desk_refund_confirmed=True)
+        result = manager_update_order(order_id, confirmed, manager, self.db)
+        self.assertEqual((result['status'], result['payment_status']), ('CANCELLED', 'REFUNDED'))
+        self.assertEqual(table.status, 'available')
+        self.assertIsNotNone(self.db.query(PlatformCommission).one().refunded_at)
+        self.assertEqual(manager_wallet.balance, 1000)
+        self.assertEqual(self.db.get(WalletAccount, admin.id).balance, 0)
+        self.assertEqual(self.db.query(WalletAccount).count(), 2)
 
     def test_takeaway_kitchen_completion_and_payment_leave_occupied_tables_alone(self):
         table = self.table()
