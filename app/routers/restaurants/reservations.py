@@ -57,7 +57,7 @@ def record_reservation_event(db: Session, item: Reservation, previous_status: st
     data = {"status": item.status, "payment_status": item.payment_status,
             "preorder_payment_status": item.preorder_payment_status,
             "actor_id": str(actor.id) if actor else None,
-            "occurred_at": datetime.now(timezone.utc).isoformat()}
+            "occurred_at": datetime.now(timezone.utc).strftime('%d %B %Y')}
     if previous_status is not None:
         data.update({"previous_status": previous_status, "reason": reason})
     db.add(RealtimeEvent(user_id=item.user_id, restaurant_id=item.restaurant_id,
@@ -173,12 +173,12 @@ def reservation_data(item: Reservation, db: Session, include_orders: bool = True
         "restaurant_email": restaurant.email if restaurant else None,
         "restaurant_phone": restaurant.phone if restaurant else None,
         "customer_name": customer.name if customer else "Customer",
-        "customer_email": customer.email if customer else None, "reservation_date": item.reservation_date.isoformat(),
+        "customer_email": customer.email if customer else None, "reservation_date": item.reservation_date.strftime('%d %B %Y'),
         "start_time": item.start_time.strftime("%H:%M"), "end_time": item.end_time.strftime("%H:%M"),
         "number_of_guests": item.number_of_guests, "status": item.status,
-        "created_at": item.created_at.isoformat() if item.created_at else None,
-        "checked_in_at": item.checked_in_at.isoformat() if item.checked_in_at else None,
-        "completed_at": item.completed_at.isoformat() if item.completed_at else None,
+        "created_at": item.created_at.strftime('%d %B %Y') if item.created_at else None,
+        "checked_in_at": item.checked_in_at.strftime('%d %B %Y') if item.checked_in_at else None,
+        "completed_at": item.completed_at.strftime('%d %B %Y') if item.completed_at else None,
         "status_reason": item.status_reason,
         "payment_status": item.payment_status, "fee_amount": float(item.fee_amount),
         "base_fee_amount": float(item.base_fee_amount if item.base_fee_amount is not None else item.fee_amount - (item.extra_fee_amount or 0)),
@@ -201,11 +201,11 @@ def reservation_data(item: Reservation, db: Session, include_orders: bool = True
                          "subtotal": float(order.subtotal), "discount_amount": float(order.discount_amount or 0),
                          "tax_percent": float(order.tax_percent or 0), "tax_amount": float(order.tax_amount or 0),
                          "total": float(order.total), "items": order.items or [],
-                         "accepted_at": order.accepted_at.isoformat() if order.accepted_at else None,
-                         "preparation_started_at": order.preparation_started_at.isoformat() if order.preparation_started_at else None,
-                         "ready_at": order.ready_at.isoformat() if order.ready_at else None,
-                         "completed_at": order.completed_at.isoformat() if order.completed_at else None,
-                         "created_at": order.created_at.isoformat() if order.created_at else None}
+                         "accepted_at": order.accepted_at.strftime('%d %B %Y') if order.accepted_at else None,
+                         "preparation_started_at": order.preparation_started_at.strftime('%d %B %Y') if order.preparation_started_at else None,
+                         "ready_at": order.ready_at.strftime('%d %B %Y') if order.ready_at else None,
+                         "completed_at": order.completed_at.strftime('%d %B %Y') if order.completed_at else None,
+                         "created_at": order.created_at.strftime('%d %B %Y') if order.created_at else None}
                         for order in food_orders],
         "tables": [{"id": str(a.table.id), "table_number": a.table.table_number,
                     "capacity": a.table.capacity, "reservation_fee": float(a.table.reservation_fee), "floor_id": str(a.table.floor_id),
@@ -367,15 +367,15 @@ def availability(restaurant_id: uuid.UUID, reservation_date: date, start_time: t
         raise HTTPException(status_code=404, detail="Restaurant not found.")
     end = (datetime.combine(reservation_date, start_time) + timedelta(minutes=duration_minutes)).time()
     if reservation_date <= datetime.now(RESTAURANT_TIMEZONE).date():
-        return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.isoformat(),
+        return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.strftime('%d %B %Y'),
                 "start_time": start_time.strftime("%H:%M"), "end_time": end.strftime("%H:%M"),
                 "available": False, "tables": [], "reason": "Reservations must be made at least one day in advance."}
     if not within_operating_hours(db, restaurant_id, reservation_date, start_time, end):
-        return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.isoformat(),
+        return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.strftime('%d %B %Y'),
                 "start_time": start_time.strftime("%H:%M"), "end_time": end.strftime("%H:%M"),
                 "available": False, "tables": [], "reason": "The restaurant is closed or this time is outside its operating hours."}
     tables = suitable_table_groups(db, restaurant_id, reservation_date, start_time, number_of_guests, duration_minutes=duration_minutes)
-    return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.isoformat(),
+    return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.strftime('%d %B %Y'),
             "start_time": start_time.strftime("%H:%M"), "end_time": end.strftime("%H:%M"),
             "available": bool(tables), "tables": floor_layout_data(db, restaurant_id, reservation_date, start_time, duration_minutes)}
 
@@ -416,7 +416,7 @@ def reservation_time_slots(restaurant_id: uuid.UUID, reservation_date: date,
                               "end_time": (datetime.combine(reservation_date, start) + timedelta(minutes=duration_minutes)).strftime("%H:%M"),
                               "duration_minutes": duration_minutes, "available": bool(groups),
                               "tables": floor_layout_data(db, restaurant_id, reservation_date, start, duration_minutes)})
-    return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.isoformat(), "slots": slots}
+    return {"restaurant_id": str(restaurant_id), "reservation_date": reservation_date.strftime('%d %B %Y'), "slots": slots}
 
 
 @customer_router.post("", status_code=status.HTTP_201_CREATED)
@@ -1044,7 +1044,7 @@ def manager_calendar_activities(
     order_rows = order_query.order_by(FoodOrder.created_at.asc()).offset((order_page - 1) * page_size).limit(page_size).all()
 
     return {
-        "date": day.isoformat(),
+        "date": day.strftime('%d %B %Y'),
         "reservation_id_lookup": is_reservation_id_lookup,
         "reservation_lookup_date": reservation_lookup_date,
         "reservations": {
@@ -1126,6 +1126,7 @@ def manager_update_reservation_status(reservation_id: uuid.UUID, payload: Manage
     if payload.status == "COMPLETED":
         item.completed_at = datetime.now(timezone.utc)
     if payload.status in {"NO_SHOW", "REJECTED"}:
+        
         item.status_reason = payload.reason
     if not already_seated:
         record_reservation_event(db, item, previous_status, manager, payload.reason)
@@ -1255,7 +1256,7 @@ def manager_confirm_preorder_payment(reservation_id: uuid.UUID, manager: User = 
         db.add(RealtimeEvent(user_id=preorder_order.customer_id, restaurant_id=preorder_order.restaurant_id,
             event_type="order.status_changed", resource_id=str(preorder_order.id),
             data={"status": preorder_order.status, "payment_status": preorder_order.payment_status,
-                  "actor_id": str(manager.id), "occurred_at": datetime.now(timezone.utc).isoformat()}))
+                  "actor_id": str(manager.id), "occurred_at": datetime.now(timezone.utc).strftime('%d %B %Y')}))
     record_reservation_event(db, item, actor=manager)
     db.commit()
     db.refresh(item)

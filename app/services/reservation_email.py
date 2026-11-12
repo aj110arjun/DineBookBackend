@@ -48,21 +48,21 @@ def _invoice_totals(item: Reservation) -> tuple[bool, Decimal, Decimal, Decimal,
     due = Decimal("0") if preorder_paid or not has_preorder else preorder_amount
     paid = Decimal(item.fee_amount or 0) + (preorder_amount if preorder_paid else Decimal("0"))
     rows = [
+        ("Restaurant", ""),
+        ("Party size", f"{item.number_of_guests} guests"),
+        ("Reservation time", f"{item.reservation_date.strftime('%d %B %Y')} · {item.start_time.strftime('%I:%M %p')}"),
         ("Reservation fee", _status(item.payment_method, item.payment_status, item.fee_amount)),
         ("Preorder", "Not ordered" if not has_preorder else _status(item.preorder_payment_method, item.preorder_payment_status, preorder_amount)),
         ("Amount paid", f"INR {paid:.2f}"),
         ("Amount due", f"INR {due:.2f}"),
-        ("Restaurant", ""),
-        ("Reservation time", f"{item.reservation_date.isoformat()} · {item.start_time.strftime('%I:%M %p')}"),
-        ("Party size", f"{item.number_of_guests} guests"),
     ]
     if getattr(item, "extra_hours", 0):
         extra = Decimal(item.extra_fee_amount or 0)
-        rows.insert(1, ("Extra dining time", f"{item.extra_hours} hr x {_money(item.extra_hour_rate)} = {_money(extra)}"))
+        rows.insert(3, ("Extra dining time", f"{item.extra_hours} hr x {_money(item.extra_hour_rate)} = {_money(extra)}"))
     if item.preorder_offer_code:
-        rows.append(("Offer applied", f"{item.preorder_offer_code} · discount INR {preorder_discount:.2f}"))
+        rows.insert(5,("Offer applied", f"{item.preorder_offer_code} · discount INR {preorder_discount:.2f}"))
     if has_preorder and preorder_tax:
-        rows.append((f"GST ({item.preorder_tax_percent}%)", f"INR {preorder_tax:.2f}"))
+        rows.insert(4, (f"GST ({item.preorder_tax_percent}%)", f"INR {preorder_tax:.2f}"))
     return has_preorder, preorder_amount, preorder_discount, preorder_subtotal, paid, due, rows
 
 

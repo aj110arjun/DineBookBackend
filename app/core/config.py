@@ -17,7 +17,7 @@ class Settings(BaseSettings):
             raise ValueError("Set DATABASE_URL in DineBookBackend/.env to your PostgreSQL connection URL.")
         return value
 
-    frontend_url: str = "http://localhost:5173"
+    frontend_url: str
     frontend_public_url: str | None = None 
 
     smtp_host: str | None = None
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # Keep the legacy development key for local session compatibility, but never
     # permit it in a production deployment (validated below).
     jwt_secret_key: str = "development-only-change-this-secret"
-    app_env: str
+    app_env: str = "development"
     jwt_issuer: str = "dinebook-api"
     jwt_audience: str = "dinebook-web"
     jwt_expire_minutes: int = 60 * 24 * 7

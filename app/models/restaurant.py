@@ -8,7 +8,6 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
-    Integer,
     Numeric,
     String,
     Text,
@@ -96,16 +95,6 @@ class Restaurant(Base):
 
     latitude: Mapped[float | None] = mapped_column(Numeric(10, 7), nullable=True)
     longitude: Mapped[float | None] = mapped_column(Numeric(10, 7), nullable=True)
-
-    capacity: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
-    )
-
-    tables: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
-    )
 
     status: Mapped[RestaurantStatus] = mapped_column(
         Enum(RestaurantStatus, name="restaurant_status"),

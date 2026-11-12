@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -27,6 +28,7 @@ def now_utc() -> datetime:
 class FoodOrderOffer(Base):
     __tablename__ = "food_order_offers"
     __table_args__ = (
+        Index("uq_food_order_offers_restaurant_code", "restaurant_id", text("upper(code)"), unique=True),
         CheckConstraint(
             "discount_percent > 0",
             name="ck_food_order_offer_discount_positive",
@@ -60,7 +62,7 @@ class FoodOrderOffer(Base):
         index=True,
     )
     code: Mapped[str] = mapped_column(
-        String(40), nullable=False, unique=True
+        String(40), nullable=False
     )
     title: Mapped[str] = mapped_column(
         String(120), nullable=False, default="Offer"

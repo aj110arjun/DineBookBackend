@@ -196,8 +196,6 @@ def get_restaurant_details(
         "city": restaurant.city,
         "state": restaurant.state,
         "pin_code": restaurant.pin_code,
-        "capacity": restaurant.capacity,
-        "tables": restaurant.tables,
         "status": restaurant.status.value,
         "created_at": restaurant.created_at,
         "updated_at": restaurant.updated_at,

@@ -13,10 +13,12 @@ from sqlalchemy.orm import Session
 
 from app.db.database import Base
 from app.models.menu import Category, Food, FoodVariant
+from app.models.notifications import Notification
 from app.models.offers import FoodOrderOffer, OfferRedemption
 from app.models.reservation import Reservation
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.user import User, UserRole
+from app.models.wallet import WalletAccount
 from app.routers.commerce.orders import calculate_offer_discount, offer_data
 from app.core.config import settings
 from app.routers.commerce.orders import (CheckoutInput, CustomerOrderCancellation, OrderLineInput,
@@ -99,6 +101,27 @@ class OfferCheckoutTests(unittest.TestCase):
         self.assertIsNotNone(order["accepted_at"])
         retry = manager_create_reservation_order(self.reservation.id, payload, manager, self.db)
         self.assertEqual(retry["id"], order["id"])
+
+    def test_wallet_checkout_and_customer_cancellation_send_notifications(self):
+        wallet = WalletAccount(user_id=self.customer.id, balance=Decimal("1000.00"))
+        self.db.add_all([
+            wallet,
+            User(name="Admin", email="order-admin@example.test", password_hash="x", role=UserRole.ADMIN),
+        ])
+        self.db.commit()
+        payload = self.payload(None).model_copy(update={"payment_method": "WALLET"})
+        order = create_reserved_order(self.reservation.id, payload, self.customer, self.db)
+        self.assertEqual(order["payment_status"], "PAID")
+        self.assertEqual(wallet.balance, Decimal("351.00"))
+
+        result = cancel_customer_order(uuid.UUID(order["id"]),
+            CustomerOrderCancellation(reason="Changed mind"), self.customer, self.db)
+        self.assertEqual(result["payment_status"], "REFUNDED")
+        self.assertEqual(wallet.balance, Decimal("1000.00"))
+        notifications = self.db.query(Notification).filter_by(
+            recipient_id=self.customer.id, notification_type="wallet.transaction").all()
+        self.assertCountEqual([notice.title for notice in notifications],
+            ["Wallet debited", "Wallet refund received"])
 
     def test_redemption_limit_is_released_after_cancellation(self):
         offer = FoodOrderOffer(restaurant_id=self.restaurant.id, code="SAVE50", title="Half price",

@@ -20,10 +20,6 @@ class ManagerRegisterRequest(BaseModel):
     state: str = Field(min_length=2, max_length=100)
     pin_code: str = Field(min_length=3, max_length=20)
 
-    # Restaurant capacity
-    capacity: int = Field(gt=0)
-    tables: int = Field(gt=0)
-
     @field_validator("name", "restaurant_name", "cuisine_type", "restaurant_contact", "address", "city", "state", "pin_code")
     @classmethod
     def trim_required_text(cls, value: str) -> str:
