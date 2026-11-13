@@ -1,6 +1,6 @@
 """Shared account settings storage and customer notification eligibility.
 
-The existing customer_settings table has a users FK, so managers can reuse the
+The existing customer_settings table has a users FK, so staff can reuse the
 same general preferences without a second table or a destructive rename.
 """
 

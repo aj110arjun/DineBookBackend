@@ -26,3 +26,4 @@ tests/*
 !tests/test_manager_settings.py
 !tests/test_manager_profile.py
 !tests/test_chef_dashboard.py
+!tests/test_chef_settings.py

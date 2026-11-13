@@ -40,6 +40,7 @@ from app.routers.manager.manager_dashboard import router as manager_dashboard_ro
 from app.routers.manager.manager_settings import router as manager_settings_router
 from app.routers.manager.manager_profile import router as manager_profile_router
 from app.routers.chef.chef_dashboard import router as chef_dashboard_router
+from app.routers.chef.chef_settings import router as chef_settings_router
 
 
 app = FastAPI(title="DineBook API", version="0.1.0")
@@ -161,6 +162,7 @@ app.include_router(manager_profile_router)
 app.include_router(chef_auth_router)
 app.include_router(chef_session_router)
 app.include_router(chef_dashboard_router)
+app.include_router(chef_settings_router)
 app.include_router(admin_managers_router)
 app.include_router(admin_restaurants_router)
 app.include_router(manager_dining_router)
