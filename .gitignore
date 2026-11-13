@@ -22,3 +22,4 @@ tests/*
 !tests/test_customer_profile.py
 !tests/test_customer_settings.py
 !tests/test_reservation_email_pass.py
+!tests/test_manager_dashboard.py

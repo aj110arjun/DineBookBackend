@@ -13,6 +13,7 @@ class Reservation(Base):
     __tablename__ = "reservations"
     __table_args__ = (
         Index("ix_reservations_restaurant_date_status", "restaurant_id", "reservation_date", "status"),
+        Index("ix_reservations_restaurant_user_date", "restaurant_id", "user_id", "reservation_date"),
         Index("ix_reservations_user_date", "user_id", "reservation_date"),
     )
 
