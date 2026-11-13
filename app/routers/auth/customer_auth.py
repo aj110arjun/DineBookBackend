@@ -170,7 +170,8 @@ def current_customer(
     customer = db.query(User).filter(User.id == customer_id, User.role == UserRole.CUSTOMER).first()
     if customer is None or customer.status != AccountStatus.ACTIVE or not customer.is_active or not customer.email_verified or not session_is_current(claims, customer):
         raise unauthorized
-    customer.can_change_email = claims.get("auth_method") == "password"
+    # Registration verification does not provide a verified email-change flow.
+    customer.can_change_email = False
     customer.auth_method = claims.get("auth_method")
     return customer
 
@@ -201,7 +202,7 @@ def login_customer(payload: CustomerLoginRequest, response: Response, db: Sessio
         raise HTTPException(status_code=403, detail="Confirm your email address before signing in.")
     token, _ = create_access_token(str(customer.id), auth_method="password")
     response.set_cookie(ACCESS_COOKIE, token, max_age=settings.jwt_expire_minutes * 60, httponly=True, secure=settings.auth_cookie_secure, samesite="lax", path="/")
-    customer.can_change_email = True
+    customer.can_change_email = False
     return customer
 
 

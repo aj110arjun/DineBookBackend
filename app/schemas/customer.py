@@ -1,8 +1,10 @@
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 import uuid
+from datetime import datetime
 
 from app.models.user import AccountStatus, UserRole
 from app.core.security import validate_new_password
+from app.core.phone import get_restaurant_phone_error
 
 
 class CustomerRegisterRequest(BaseModel):
@@ -45,3 +47,35 @@ class CustomerResponse(BaseModel):
     status: AccountStatus
     is_active: bool
     can_change_email: bool = False
+    phone: str | None = None
+    avatar_url: str | None = None
+    created_at: datetime
+
+
+class CustomerProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    phone: str | None = Field(default=None, max_length=20)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def clean_name(cls, value):
+        if not isinstance(value, str):
+            raise ValueError("Full name is required.")
+        return CustomerRegisterRequest.normalize_name(value)
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def clean_phone(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("Enter a valid phone number.")
+        phone = value.strip()
+        if not phone:
+            return None
+        error = get_restaurant_phone_error(phone)
+        if error:
+            raise ValueError(error)
+        return phone
