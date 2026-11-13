@@ -42,6 +42,7 @@ class FoodOrder(Base):
         ),
         Index("ix_food_orders_restaurant_status_created", "restaurant_id", "status", "created_at"),
         Index("ix_food_orders_restaurant_created", "restaurant_id", "created_at"),
+        Index("ix_food_orders_restaurant_customer_created", "restaurant_id", "customer_id", "created_at"),
         Index("ix_food_orders_customer_created", "customer_id", "created_at"),
         Index("ix_food_orders_reservation_id", "reservation_id"),
     )

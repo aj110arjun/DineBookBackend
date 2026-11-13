@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import uuid
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,7 +25,11 @@ class PlatformRevenueSettings(Base):
 
 class PlatformCommission(Base):
     __tablename__ = "platform_commissions"
-    __table_args__ = (UniqueConstraint("source_type", "source_id", name="uq_platform_commissions_source"),)
+    __table_args__ = (
+        UniqueConstraint("source_type", "source_id", name="uq_platform_commissions_source"),
+        Index("ix_commissions_restaurant_occurred", "restaurant_id", "occurred_at"),
+        Index("ix_commissions_restaurant_refunded", "restaurant_id", "refunded_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     manager_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
