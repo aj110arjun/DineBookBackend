@@ -15,6 +15,7 @@ from app.routers.auth.chef_auth import current_chef
 from app.routers.auth.customer_auth import current_customer
 from app.routers.auth.manager_auth import current_manager
 from app.services.customer_settings import CATEGORY_FIELDS, notification_values
+from app.services.manager_settings import MANAGER_CATEGORY_FIELDS, manager_notification_values
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 CATEGORIES = {"RESERVATION", "ORDER", "PAYMENT", "REVIEW", "STAFF", "APPROVAL", "SYSTEM", "PROMOTION"}
@@ -97,6 +98,9 @@ def get_preferences(token: str | None = Cookie(default=None, alias=ACCESS_COOKIE
     if user.role == UserRole.CUSTOMER:
         values = notification_values(db, user.id)
         configured.update({category: all(values[field] for field in fields) for category, fields in CATEGORY_FIELDS.items()})
+    elif user.role == UserRole.MANAGER:
+        values = manager_notification_values(db, user.id)
+        configured.update({category: all(values[field] for field in fields) for category, fields in MANAGER_CATEGORY_FIELDS.items()})
     return {"preferences": {category: configured.get(category, True) for category in sorted(CATEGORIES)}}
 
 
@@ -114,8 +118,9 @@ def update_preferences(payload: PreferenceUpdate, token: str | None = Cookie(def
             db.add(row)
         else:
             row.enabled = enabled
-        if user.role == UserRole.CUSTOMER:
-            for field in CATEGORY_FIELDS.get(category, ()):
+        if user.role in {UserRole.CUSTOMER, UserRole.MANAGER}:
+            fields = MANAGER_CATEGORY_FIELDS if user.role == UserRole.MANAGER else CATEGORY_FIELDS
+            for field in fields.get(category, ()):
                 granular = db.query(NotificationPreference).filter_by(user_id=user.id, category=field.upper()).first()
                 if granular is None:
                     db.add(NotificationPreference(user_id=user.id, category=field.upper(), enabled=enabled))

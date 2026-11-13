@@ -1,4 +1,8 @@
-"""One source of truth for customer settings and notification eligibility."""
+"""Shared account settings storage and customer notification eligibility.
+
+The existing customer_settings table has a users FK, so managers can reuse the
+same general preferences without a second table or a destructive rename.
+"""
 
 from datetime import datetime, timezone
 
@@ -21,16 +25,18 @@ CATEGORY_FIELDS = {
 }
 
 
-def notification_values(db: Session, customer_id) -> dict[str, bool]:
+def notification_values(db: Session, customer_id, *, defaults=None, category_fields=None) -> dict[str, bool]:
+    defaults = NOTIFICATION_DEFAULTS if defaults is None else defaults
+    category_fields = CATEGORY_FIELDS if category_fields is None else category_fields
     configured = {row.category: row.enabled for row in db.query(NotificationPreference).filter_by(user_id=customer_id).all()}
     # Preserve existing category opt-outs when granular preferences are first created.
-    legacy = {field: configured[category] for category, fields in CATEGORY_FIELDS.items()
+    legacy = {field: configured[category] for category, fields in category_fields.items()
               if category in configured for field in fields}
     return {key: configured.get(key.upper(), legacy.get(key, default))
-            for key, default in NOTIFICATION_DEFAULTS.items()}
+            for key, default in defaults.items()}
 
 
-def _initialize_locked(db: Session, customer: User) -> CustomerSettings:
+def _initialize_locked(db: Session, customer: User, *, defaults=None, category_fields=None) -> CustomerSettings:
     # The parent exists even before settings do. Lock it to serialize first-use
     # initialization and concurrent PATCHes without a check-then-insert race.
     db.query(User).filter_by(id=customer.id).with_for_update().one()
@@ -38,7 +44,7 @@ def _initialize_locked(db: Session, customer: User) -> CustomerSettings:
     if row is None:
         row = CustomerSettings(customer_id=customer.id)
         db.add(row)
-    values = notification_values(db, customer.id)
+    values = notification_values(db, customer.id, defaults=defaults, category_fields=category_fields)
     existing = {pref.category: pref for pref in db.query(NotificationPreference).filter_by(user_id=customer.id).all()}
     for key, value in values.items():
         if key.upper() not in existing:
@@ -47,9 +53,10 @@ def _initialize_locked(db: Session, customer: User) -> CustomerSettings:
     return row
 
 
-def settings_response(db: Session, customer: User, *, section: str | None = None, changes: dict | None = None) -> dict:
+def settings_response(db: Session, customer: User, *, section: str | None = None, changes: dict | None = None,
+                      defaults=None, category_fields=None) -> dict:
     try:
-        row = _initialize_locked(db, customer)
+        row = _initialize_locked(db, customer, defaults=defaults, category_fields=category_fields)
         if section == "notifications":
             for key, value in (changes or {}).items():
                 pref = db.query(NotificationPreference).filter_by(user_id=customer.id, category=key.upper()).one()
@@ -60,7 +67,8 @@ def settings_response(db: Session, customer: User, *, section: str | None = None
         if changes:
             row.updated_at = datetime.now(timezone.utc)
         db.flush()
-        result = {"notifications": notification_values(db, customer.id), "general": GeneralSettings.model_validate(row).model_dump()}
+        result = {"notifications": notification_values(db, customer.id, defaults=defaults, category_fields=category_fields),
+                  "general": GeneralSettings.model_validate(row).model_dump()}
         db.commit()
         return result
     except SQLAlchemyError as exc:

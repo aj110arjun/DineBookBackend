@@ -21,13 +21,13 @@ MAX_AVATAR_PIXELS = 20_000_000
 IMAGE_FORMATS = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP"}
 
 
-def validated_avatar(image: UploadFile) -> bytes:
+def validated_avatar(image: UploadFile, *, label: str = "Profile photos") -> bytes:
     expected_format = IMAGE_FORMATS.get(image.content_type)
     if expected_format is None:
-        raise HTTPException(status_code=400, detail="Profile photos must be JPEG, PNG, or WebP.")
+        raise HTTPException(status_code=400, detail=f"{label} must be JPEG, PNG, or WebP.")
     content = image.file.read(MAX_AVATAR_BYTES + 1)
     if len(content) > MAX_AVATAR_BYTES:
-        raise HTTPException(status_code=413, detail="Profile photos must be 5 MB or smaller.")
+        raise HTTPException(status_code=413, detail=f"{label} must be 5 MB or smaller.")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -67,13 +67,13 @@ def update_profile(db: Session, customer: User, payload: CustomerProfileUpdate) 
     return customer
 
 
-def replace_avatar(db: Session, customer: User, image: UploadFile) -> User:
+def replace_avatar(db: Session, customer: User, image: UploadFile, *, folder: str = "customer-avatars") -> User:
     content = validated_avatar(image)
     if not all((settings.cloudinary_cloud_name, settings.cloudinary_api_key, settings.cloudinary_api_secret)):
         raise HTTPException(status_code=503, detail="Profile photo uploads are currently unavailable.")
     new_public_id = None
     try:
-        result = upload_file(io.BytesIO(content), folder=f"dinebook/customer-avatars/{customer.id}", resource_type="image")
+        result = upload_file(io.BytesIO(content), folder=f"dinebook/{folder}/{customer.id}", resource_type="image")
         new_public_id, url = result.get("public_id"), result.get("secure_url")
         if (not isinstance(new_public_id, str) or not 1 <= len(new_public_id) <= 255
                 or not isinstance(url, str) or not url.startswith("https://") or len(url) > 2048):
