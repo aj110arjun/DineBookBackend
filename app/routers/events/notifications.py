@@ -14,9 +14,10 @@ from app.routers.auth.admin_auth import ACCESS_COOKIE, current_admin
 from app.routers.auth.chef_auth import current_chef
 from app.routers.auth.customer_auth import current_customer
 from app.routers.auth.manager_auth import current_manager
+from app.services.customer_settings import CATEGORY_FIELDS, notification_values
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
-CATEGORIES = {"RESERVATION", "ORDER", "PAYMENT", "REVIEW", "STAFF", "APPROVAL", "SYSTEM"}
+CATEGORIES = {"RESERVATION", "ORDER", "PAYMENT", "REVIEW", "STAFF", "APPROVAL", "SYSTEM", "PROMOTION"}
 
 
 def _user(token: str | None, db: Session) -> User:
@@ -86,13 +87,16 @@ def unread_count(token: str | None = Cookie(default=None, alias=ACCESS_COOKIE), 
 
 
 class PreferenceUpdate(BaseModel):
-    preferences: dict[str, bool] = Field(max_length=7)
+    preferences: dict[str, bool] = Field(max_length=8)
 
 
 @router.get("/preferences")
 def get_preferences(token: str | None = Cookie(default=None, alias=ACCESS_COOKIE), db: Session = Depends(get_db)) -> dict:
     user = _user(token, db)
     configured = {row.category: row.enabled for row in db.query(NotificationPreference).filter_by(user_id=user.id).all()}
+    if user.role == UserRole.CUSTOMER:
+        values = notification_values(db, user.id)
+        configured.update({category: all(values[field] for field in fields) for category, fields in CATEGORY_FIELDS.items()})
     return {"preferences": {category: configured.get(category, True) for category in sorted(CATEGORIES)}}
 
 
@@ -102,14 +106,21 @@ def update_preferences(payload: PreferenceUpdate, token: str | None = Cookie(def
     user = _user(token, db)
     if any(key.upper() not in CATEGORIES for key in payload.preferences):
         raise HTTPException(400, "Unknown notification category.")
-    for category, enabled in payload.preferences.items():
-        category = category.upper()
+    db.query(User).filter_by(id=user.id).with_for_update().one()
+    for category, enabled in {key.upper(): value for key, value in payload.preferences.items()}.items():
         row = db.query(NotificationPreference).filter_by(user_id=user.id, category=category).first()
         if row is None:
             row = NotificationPreference(user_id=user.id, category=category, enabled=enabled)
             db.add(row)
         else:
             row.enabled = enabled
+        if user.role == UserRole.CUSTOMER:
+            for field in CATEGORY_FIELDS.get(category, ()):
+                granular = db.query(NotificationPreference).filter_by(user_id=user.id, category=field.upper()).first()
+                if granular is None:
+                    db.add(NotificationPreference(user_id=user.id, category=field.upper(), enabled=enabled))
+                else:
+                    granular.enabled = enabled
     db.commit()
     return get_preferences(token, db)
 

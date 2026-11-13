@@ -9,8 +9,9 @@ from app.models.realtime import RealtimeEvent
 from app.models.restaurant import Restaurant
 from app.models.user import User, UserRole
 from app.models.wallet import WalletTransaction
+from app.services.customer_settings import customer_notification_allowed
 
-ALLOWED_CATEGORIES = {"RESERVATION", "ORDER", "PAYMENT", "REVIEW", "STAFF", "APPROVAL", "SYSTEM"}
+ALLOWED_CATEGORIES = {"RESERVATION", "ORDER", "PAYMENT", "REVIEW", "STAFF", "APPROVAL", "SYSTEM", "PROMOTION"}
 MANDATORY_TYPES = {"payment.failed", "payment.success", "wallet.topup.success", "wallet.topup.failed",
                    "restaurant.suspended", "system.incident", "reservation.reminder", "review.moderated",
                    "wallet.transaction", "wallet.credit.issued",}
@@ -47,9 +48,14 @@ def create_notification(db: Session, recipient: User, *, notification_type: str,
     action_url = _safe_action_url(action_url)
     if dedupe_key and db.query(Notification.id).filter_by(recipient_id=recipient.id, dedupe_key=dedupe_key).first():
         return None
-    pref = db.query(NotificationPreference).filter_by(user_id=recipient.id, category=category).first()
-    if pref is not None and not pref.enabled and notification_type not in MANDATORY_TYPES:
-        return None
+    if recipient.role == UserRole.CUSTOMER:
+        if not customer_notification_allowed(db, recipient, notification_type=notification_type,
+                                             category=category, channel="in_app", metadata=metadata):
+            return None
+    else:
+        pref = db.query(NotificationPreference).filter_by(user_id=recipient.id, category=category).first()
+        if pref is not None and not pref.enabled and notification_type not in MANDATORY_TYPES:
+            return None
     item = Notification(
         recipient_id=recipient.id, restaurant_id=restaurant_id, notification_type=notification_type[:80],
         category=category, title=title.strip()[:160], message=message.strip()[:2000],
