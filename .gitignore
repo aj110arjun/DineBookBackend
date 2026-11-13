@@ -19,3 +19,4 @@ tests/*
 !tests/test_order_idempotency.py
 !tests/test_reservation_pricing.py
 !tests/test_manager_calendar.py
+!tests/test_customer_profile.py
