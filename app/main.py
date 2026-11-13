@@ -37,6 +37,8 @@ from app.routers.customer.customer_settings import router as customer_settings_r
 from app.routers.restaurants.reviews import customer_router as customer_reviews_router, public_router as public_reviews_router, chef_router as chef_reviews_router, manager_router as manager_reviews_router, admin_router as admin_reviews_router
 from app.routers.commerce.revenue import admin_router as admin_revenue_router, manager_router as manager_revenue_router, chef_router as chef_revenue_router
 from app.routers.manager.manager_dashboard import router as manager_dashboard_router
+from app.routers.manager.manager_settings import router as manager_settings_router
+from app.routers.manager.manager_profile import router as manager_profile_router
 
 
 app = FastAPI(title="DineBook API", version="0.1.0")
@@ -153,6 +155,8 @@ app.include_router(manager_auth_router)
 app.include_router(manager_staff_router)
 app.include_router(manager_menu_router)
 app.include_router(manager_dashboard_router)
+app.include_router(manager_settings_router)
+app.include_router(manager_profile_router)
 app.include_router(chef_auth_router)
 app.include_router(chef_session_router)
 app.include_router(admin_managers_router)

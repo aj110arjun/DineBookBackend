@@ -19,7 +19,8 @@ class CustomerSettings(Base):
         CheckConstraint("time_format IN ('12h', '24h')", name="ck_customer_settings_time_format"),
     )
 
-    # A customer FK as the primary key enforces one settings record per customer.
+    # Legacy table/column names; the users FK supports one record per account.
+    # Manager and customer APIs each authorize their own account before access.
     customer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     customer: Mapped["User"] = relationship("User")
     theme: Mapped[str] = mapped_column(String(10), nullable=False, default="system", server_default="system")
