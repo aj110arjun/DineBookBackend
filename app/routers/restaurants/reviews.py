@@ -245,12 +245,19 @@ def reply_to_review(review_id: uuid.UUID, payload: ReplyPayload, manager: User =
     if len(content) < 3:
         raise HTTPException(422, "Reply must contain at least 3 non-space characters.")
     reply = db.query(ReviewReply).filter(ReviewReply.review_id == review.id).first()
+    reply_changed = reply is None or reply.content != content
     if reply is None:
         reply = ReviewReply(review_id=review.id, restaurant_id=restaurant.id, manager_id=manager.id, content=content)
         db.add(reply)
     else:
         reply.content = content
         reply.manager_id = manager.id
+    customer = db.get(User, review.customer_id)
+    if customer and reply_changed:
+        create_notification(db, customer, notification_type="review.reply", category="REVIEW",
+            title="A restaurant responded to your review", message=f"{restaurant.name} has responded to your review.",
+            restaurant_id=restaurant.id, entity_type="review", entity_id=review.id,
+            action_url="/customer/profile/reviews")
     db.commit()
     db.refresh(reply)
     return review_data(db, review, True)["reply"]

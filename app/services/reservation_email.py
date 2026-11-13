@@ -8,6 +8,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.core.email import send_branded_email
+from app.services.customer_settings import customer_notification_allowed
 from app.db.database import SessionLocal
 from app.models.dining import DiningTable
 from app.models.reservation import Reservation, ReservationTable
@@ -78,6 +79,9 @@ def send_reservation_confirmation(db: Session, reservation_id: uuid.UUID) -> boo
 
     if customer is None or restaurant is None or not customer.email:
         logger.warning("Cannot send reservation confirmation email; customer or restaurant is missing for %s", reservation_id)
+        return False
+
+    if not customer_notification_allowed(db, customer, notification_type="reservation.confirmed", category="RESERVATION", channel="email"):
         return False
 
     assignments = db.query(ReservationTable).filter(ReservationTable.reservation_id == item.id).all()

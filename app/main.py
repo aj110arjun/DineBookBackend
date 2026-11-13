@@ -33,6 +33,7 @@ from app.routers.events.notifications import router as notifications_router
 from app.routers.restaurants.operating_hours import admin_router as admin_operating_hours_router, chef_router as chef_operating_hours_router, customer_router as customer_operating_hours_router, manager_router as manager_operating_hours_router
 from app.routers.customer.customer_transactions import router as customer_transactions_router
 from app.routers.customer.customer_profile import router as customer_profile_router
+from app.routers.customer.customer_settings import router as customer_settings_router
 from app.routers.restaurants.reviews import customer_router as customer_reviews_router, public_router as public_reviews_router, chef_router as chef_reviews_router, manager_router as manager_reviews_router, admin_router as admin_reviews_router
 from app.routers.commerce.revenue import admin_router as admin_revenue_router, manager_router as manager_revenue_router, chef_router as chef_revenue_router
 
@@ -145,6 +146,7 @@ app.include_router(password_recovery_router)
 app.include_router(customer_restaurants_router)
 app.include_router(session_router)
 app.include_router(customer_profile_router)
+app.include_router(customer_settings_router)
 app.include_router(admin_auth_router)
 app.include_router(manager_auth_router)
 app.include_router(manager_staff_router)

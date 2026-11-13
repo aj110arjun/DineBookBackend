@@ -23,8 +23,10 @@ from app.models.notifications import Notification, NotificationPreference
 from app.models.revenue import PlatformCommission, PlatformCommissionPayout, PlatformRevenueSettings
 from app.models.restaurant_staff import RestaurantStaff
 from app.models.rate_limit import RateLimitBucket
+from app.models.customer_settings import CustomerSettings
 
 __all__ = [
+    "CustomerSettings",
     "AccountStatus",
     "EmailVerificationCode",
     "Restaurant",

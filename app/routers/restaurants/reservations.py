@@ -179,6 +179,10 @@ def reservation_data(item: Reservation, db: Session, include_orders: bool = True
         "created_at": item.created_at.strftime('%d %B %Y') if item.created_at else None,
         "checked_in_at": item.checked_in_at.strftime('%d %B %Y') if item.checked_in_at else None,
         "completed_at": item.completed_at.strftime('%d %B %Y') if item.completed_at else None,
+        # Preserve legacy date labels while exposing full instants for customer
+        # timezone/clock preferences. Calendar reservation_date stays unchanged.
+        "timestamps": {field: getattr(item, field).isoformat() if getattr(item, field) else None
+                       for field in ("created_at", "checked_in_at", "completed_at")},
         "status_reason": item.status_reason,
         "payment_status": item.payment_status, "fee_amount": float(item.fee_amount),
         "base_fee_amount": float(item.base_fee_amount if item.base_fee_amount is not None else item.fee_amount - (item.extra_fee_amount or 0)),
@@ -205,7 +209,9 @@ def reservation_data(item: Reservation, db: Session, include_orders: bool = True
                          "preparation_started_at": order.preparation_started_at.strftime('%d %B %Y') if order.preparation_started_at else None,
                          "ready_at": order.ready_at.strftime('%d %B %Y') if order.ready_at else None,
                          "completed_at": order.completed_at.strftime('%d %B %Y') if order.completed_at else None,
-                         "created_at": order.created_at.strftime('%d %B %Y') if order.created_at else None}
+                         "created_at": order.created_at.strftime('%d %B %Y') if order.created_at else None,
+                         "timestamps": {field: getattr(order, field).isoformat() if getattr(order, field) else None
+                                        for field in ("created_at", "accepted_at", "preparation_started_at", "ready_at", "completed_at")}}
                         for order in food_orders],
         "tables": [{"id": str(a.table.id), "table_number": a.table.table_number,
                     "capacity": a.table.capacity, "reservation_fee": float(a.table.reservation_fee), "floor_id": str(a.table.floor_id),
