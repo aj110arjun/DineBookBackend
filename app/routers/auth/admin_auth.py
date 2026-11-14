@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.core.security import create_access_token, verify_secret, session_is_current
 from app.db.database import get_db
 from app.models.user import AccountStatus, User, UserRole
+from app.schemas.admin_profile import AdminDetails
 
 
 router = APIRouter(
@@ -115,16 +116,10 @@ def current_admin(
 
     return admin
 
-@router.get("/me", response_model=dict)
-def get_current_admin(
-    admin: User = Depends(current_admin),
-) -> dict:
-    return {
-        "id": str(admin.id),
-        "name": admin.name,
-        "email": admin.email,
-        "role": admin.role.value,
-    }
+@router.get("/me", response_model=AdminDetails)
+def get_current_admin(admin: User = Depends(current_admin)):
+    return admin
+
 
 @router.post("/logout")
 def logout_admin(response: Response) -> dict[str, str]:
