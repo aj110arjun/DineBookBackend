@@ -44,6 +44,7 @@ from app.routers.chef.chef_settings import router as chef_settings_router
 from app.routers.chef.chef_profile import router as chef_profile_router
 from app.routers.admin.admin_dashboard import router as admin_dashboard_router
 from app.routers.admin.admin_profile import router as admin_profile_router
+from app.routers.admin.admin_settings import router as admin_settings_router
 
 
 app = FastAPI(title="DineBook API", version="0.1.0")
@@ -209,6 +210,7 @@ app.include_router(manager_operating_hours_router)
 app.include_router(chef_operating_hours_router)
 app.include_router(admin_operating_hours_router)
 app.include_router(admin_profile_router)
+app.include_router(admin_settings_router)
 
 
 @app.get("/api/health", tags=["health"])

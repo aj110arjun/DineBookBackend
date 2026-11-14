@@ -12,6 +12,7 @@ from app.models.wallet import WalletTransaction
 from app.services.customer_settings import customer_notification_allowed
 from app.services.manager_settings import manager_notification_allowed
 from app.services.chef_settings import chef_notification_allowed
+from app.services.admin_settings import admin_notification_allowed
 
 ALLOWED_CATEGORIES = {"RESERVATION", "ORDER", "PAYMENT", "REVIEW", "STAFF", "APPROVAL", "SYSTEM", "PROMOTION"}
 MANDATORY_TYPES = {"payment.failed", "payment.success", "wallet.topup.success", "wallet.topup.failed",
@@ -61,6 +62,15 @@ def create_notification(db: Session, recipient: User, *, notification_type: str,
     elif recipient.role == UserRole.CHEF:
         if not chef_notification_allowed(db, recipient, notification_type=notification_type,
                                          category=category, metadata=metadata):
+            return None
+    elif recipient.role == UserRole.ADMIN:
+        if not admin_notification_allowed(
+            db,
+            recipient,
+            notification_type=notification_type,
+            category=category,
+            metadata=metadata,
+        ):
             return None
     else:
         pref = db.query(NotificationPreference).filter_by(user_id=recipient.id, category=category).first()

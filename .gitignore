@@ -28,3 +28,4 @@ tests/*
 !tests/test_chef_dashboard.py
 !tests/test_chef_settings.py
 !tests/test_chef_profile.py
+!tests/test_admin_settings.py
