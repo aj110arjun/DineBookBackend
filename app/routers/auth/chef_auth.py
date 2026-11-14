@@ -1,16 +1,16 @@
 import uuid
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
-from app.core.security import create_access_token, decode_access_token, hash_password, verify_secret, session_is_current, validate_new_password
+from app.core.security import create_access_token, decode_access_token, verify_secret, session_is_current, validate_new_password
 from app.db.database import get_db
 from app.models.restaurant import Restaurant
 from app.models.menu import Category, Food
 from app.models.user import AccountStatus, User, UserRole
+from app.services.password_change import save_password
 
 
 router = APIRouter(prefix="/api/auth/chef", tags=["chef authentication"])
@@ -24,10 +24,19 @@ class ChefLoginRequest(BaseModel):
 
 
 class ChefChangePasswordRequest(BaseModel):
-    password: str = Field(min_length=10, max_length=128)
+    model_config = ConfigDict(extra="forbid")
+
+    password: str = Field(min_length=8, max_length=128)
     current_password: str | None = Field(default=None, min_length=1, max_length=128)
+    confirm_password: str | None = Field(default=None, min_length=8, max_length=128)
 
     _password_policy = field_validator("password")(validate_new_password)
+
+    @model_validator(mode="after")
+    def passwords_match(self):
+        if self.confirm_password is not None and self.password != self.confirm_password:
+            raise ValueError("Passwords do not match.")
+        return self
 
 
 def current_chef(
@@ -168,21 +177,8 @@ def change_chef_password(
         raise HTTPException(status_code=400, detail="Enter your current password to change it.")
     if verify_secret(payload.password, chef.password_hash):
         raise HTTPException(status_code=422, detail="Choose a password different from your current password.")
-    chef.password_hash = hash_password(payload.password)
-    chef.password_changed_at = datetime.now(timezone.utc)
     chef.must_change_password = False
-    db.commit()
-    token, _ = create_access_token(str(chef.id))
-    response.set_cookie(
-        key=ACCESS_COOKIE,
-        value=token,
-        max_age=settings.jwt_expire_minutes * 60,
-        httponly=True,
-        secure=settings.auth_cookie_secure,
-        samesite="lax",
-        path="/",
-    )
-    return {"message": "Your password has been updated."}
+    return save_password(db, chef, payload.password, response)
 
 
 @session_router.get("/api/chef/me", response_model=dict)

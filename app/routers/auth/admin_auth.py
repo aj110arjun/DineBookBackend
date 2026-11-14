@@ -9,6 +9,8 @@ from app.core.security import create_access_token, verify_secret, session_is_cur
 from app.db.database import get_db
 from app.models.user import AccountStatus, User, UserRole
 from app.schemas.admin_profile import AdminDetails
+from app.schemas.password_change import PasswordChangeRequest
+from app.services.password_change import change_password
 
 
 router = APIRouter(
@@ -119,6 +121,16 @@ def current_admin(
 @router.get("/me", response_model=AdminDetails)
 def get_current_admin(admin: User = Depends(current_admin)):
     return admin
+
+
+@router.post("/change-password")
+def change_admin_password(
+    payload: PasswordChangeRequest,
+    response: Response,
+    admin: User = Depends(current_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    return change_password(payload, response, admin, db)
 
 
 @router.post("/logout")

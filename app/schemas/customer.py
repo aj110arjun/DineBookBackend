@@ -10,8 +10,8 @@ from app.core.phone import get_restaurant_phone_error
 class CustomerRegisterRequest(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     email: EmailStr
-    password: str = Field(min_length=10, max_length=128)
-    confirm_password: str = Field(min_length=10, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
+    confirm_password: str = Field(min_length=8, max_length=128)
 
     _password_policy = field_validator("password")(validate_new_password)
 
@@ -47,6 +47,7 @@ class CustomerResponse(BaseModel):
     status: AccountStatus
     is_active: bool
     can_change_email: bool = False
+    can_change_password: bool = False
     phone: str | None = None
     avatar_url: str | None = None
     created_at: datetime
