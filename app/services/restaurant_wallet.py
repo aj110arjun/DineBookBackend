@@ -1,4 +1,4 @@
-"""Restaurant payment credits and automatic platform commission settlement."""
+"""Digital payment credits and direct-payment commission receivables."""
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -61,7 +61,7 @@ def commission_record(db: Session, restaurant_id: uuid.UUID, source_type: str,
 def record_restaurant_payment(db: Session, restaurant_id: uuid.UUID, amount: Decimal,
                               description: str, reference: str, *, credit_gross: bool = True,
                               occurred_at: datetime | None = None) -> None:
-    """Credit digital funds and settle commission atomically; cash has no gross wallet credit."""
+    """Digital funds settle atomically; direct payments create an unpaid receivable."""
     amount = money(amount)
     if amount <= 0:
         return
@@ -75,7 +75,8 @@ def record_restaurant_payment(db: Session, restaurant_id: uuid.UUID, amount: Dec
             raise HTTPException(status_code=409, detail="This payment has already been refunded.")
         # Historical commission records already represent a credited/collected payment.
         # Settle only their unpaid commission, without crediting the gross again.
-        settle_payment_commission(db, record)
+        if credit_gross:
+            settle_payment_commission(db, record)
         return
 
     rate = Decimal(settings_row(db).commission_percent)
@@ -98,7 +99,8 @@ def record_restaurant_payment(db: Session, restaurant_id: uuid.UUID, amount: Dec
         ).first()
         if previous is None:
             record_wallet_entry(db, account, amount, description, reference)
-    settle_payment_commission(db, record, require_balance=not credit_gross)
+    if credit_gross:
+        settle_payment_commission(db, record, require_balance=False)
 
 
 def reverse_restaurant_payment(db: Session, restaurant_id: uuid.UUID, amount: Decimal,

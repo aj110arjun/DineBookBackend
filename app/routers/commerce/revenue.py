@@ -18,7 +18,8 @@ from app.models.wallet import WalletAccount, WalletTransaction, WalletTransfer
 from app.routers.auth.admin_auth import current_admin
 from app.routers.auth.chef_auth import current_chef
 from app.routers.auth.manager_auth import current_manager
-from app.services.commission import recipient_admin, settings_row
+from app.services.commission import recipient_admin, settings_row, settle_payment_commission
+from app.services.restaurant_wallet import locked_restaurant
 
 
 admin_router = APIRouter(prefix="/api/admin/revenue", tags=["revenue wallets"])
@@ -304,8 +305,25 @@ def update_commission(payload: CommissionUpdate, admin: User = Depends(current_a
 
 
 @manager_router.post("/commission-payouts")
-def pay_admin_commission(manager: User = Depends(current_manager)) -> dict:
-    raise HTTPException(status_code=410, detail="Commission is now transferred automatically.")
+def pay_admin_commission(manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
+    restaurant = db.query(Restaurant).filter(Restaurant.manager_id == manager.id).first()
+    if restaurant is None:
+        raise HTTPException(status_code=404, detail="No restaurant is linked to this manager.")
+    locked_restaurant(db, restaurant.id)
+    records = db.query(PlatformCommission).filter(
+        PlatformCommission.manager_id == manager.id,
+        PlatformCommission.restaurant_id == restaurant.id,
+        PlatformCommission.payout_id.is_(None), PlatformCommission.refunded_at.is_(None),
+    ).order_by(PlatformCommission.id).populate_existing().with_for_update().all()
+    amount = sum((Decimal(row.commission_amount) for row in records), Decimal("0.00"))
+    try:
+        for record in records:
+            settle_payment_commission(db, record)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {"settled_count": len(records), "amount": str(amount.quantize(CENT))}
 
 
 @manager_router.get("")
