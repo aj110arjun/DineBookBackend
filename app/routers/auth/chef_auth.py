@@ -78,6 +78,8 @@ def chef_profile(chef: User, db: Session | None = None) -> dict:
         "id": str(chef.id),
         "name": chef.name,
         "email": chef.email,
+        "phone": chef.phone,
+        "avatar_url": chef.avatar_url,
         "role": chef.role.value,
         "status": chef.status.value,
         "restaurant_name": restaurant,
