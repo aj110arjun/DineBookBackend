@@ -112,6 +112,7 @@ class CustomerProfileTests(unittest.TestCase):
             self.assertIsNone(result.json["phone"])
             self.assertTrue(result.json["created_at"])
             self.assertFalse(result.json["can_change_email"])
+            self.assertTrue(result.json["can_change_password"])
             self.assertTrue({"password_hash", "avatar_public_id", "auth_method", "password_changed_at"}.isdisjoint(result.json))
             self.assertEqual(result.headers["cache-control"], "no-store")
 

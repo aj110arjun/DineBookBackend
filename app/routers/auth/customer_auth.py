@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session
 
@@ -18,6 +18,8 @@ from app.core.security import create_access_token, decode_access_token, hash_pas
 from app.db.database import get_db
 from app.models.user import AccountStatus, EmailVerificationCode, User, UserRole
 from app.schemas.customer import CustomerRegisterRequest, CustomerResponse
+from app.schemas.password_change import PasswordChangeRequest
+from app.services.password_change import save_password
 
 router = APIRouter(prefix="/api/auth/customer", tags=["customer authentication"])
 session_router = APIRouter(tags=["customer sessions"])
@@ -56,25 +58,13 @@ class CustomerEmailRequest(BaseModel):
 
 
 class CustomerPasswordResetRequest(CustomerEmailCodeRequest):
-    new_password: str = Field(min_length=10, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
     _password_policy = field_validator("new_password")(validate_new_password)
 
 
-class CustomerPasswordChangeRequest(BaseModel):
-    current_password: str = Field(min_length=1, max_length=128)
-    new_password: str = Field(min_length=10, max_length=128)
-    confirm_password: str = Field(min_length=10, max_length=128)
-
-    _password_policy = field_validator("new_password")(validate_new_password)
-
-    @model_validator(mode="after")
-    def passwords_match(self):
-        if self.new_password != self.confirm_password:
-            raise ValueError("Passwords do not match.")
-        if self.current_password == self.new_password:
-            raise ValueError("Choose a password different from your current password.")
-        return self
+class CustomerPasswordChangeRequest(PasswordChangeRequest):
+    pass
 
 
 def send_verification_email(email: str, code: str) -> None:
@@ -173,21 +163,18 @@ def current_customer(
     # Registration verification does not provide a verified email-change flow.
     customer.can_change_email = False
     customer.auth_method = claims.get("auth_method")
+    customer.can_change_password = customer.auth_method != "google"
     return customer
 
 
 @router.post("/change-password")
 def change_customer_password(payload: CustomerPasswordChangeRequest, response: Response,
                              customer: User = Depends(current_customer), db: Session = Depends(get_db)) -> dict:
+    if not customer.can_change_password:
+        raise HTTPException(status_code=403, detail="Manage your password through your Google account.")
     if not verify_secret(payload.current_password, customer.password_hash):
         raise HTTPException(status_code=400, detail="Your current password is incorrect.")
-    customer.password_hash = hash_password(payload.new_password)
-    customer.password_changed_at = datetime.now(timezone.utc)
-    db.commit()
-    token, _ = create_access_token(str(customer.id), auth_method=customer.auth_method)
-    response.set_cookie(key=ACCESS_COOKIE, value=token, max_age=settings.jwt_expire_minutes * 60,
-                        httponly=True, secure=settings.auth_cookie_secure, samesite="lax", path="/")
-    return {"message": "Your password has been updated."}
+    return save_password(db, customer, payload.new_password, response, auth_method=customer.auth_method)
 
 
 @router.post("/login", response_model=CustomerResponse)
@@ -203,6 +190,7 @@ def login_customer(payload: CustomerLoginRequest, response: Response, db: Sessio
     token, _ = create_access_token(str(customer.id), auth_method="password")
     response.set_cookie(ACCESS_COOKIE, token, max_age=settings.jwt_expire_minutes * 60, httponly=True, secure=settings.auth_cookie_secure, samesite="lax", path="/")
     customer.can_change_email = False
+    customer.can_change_password = True
     return customer
 
 

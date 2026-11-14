@@ -41,6 +41,8 @@ from app.models.restaurant_hours import RestaurantHours
 from app.models.user import AccountStatus, User, UserRole
 from app.services.notifications import create_notification
 from app.models.user import EmailVerificationCode
+from app.schemas.password_change import PasswordChangeRequest
+from app.services.password_change import change_password
 
 
 router = APIRouter(
@@ -842,6 +844,16 @@ def get_current_manager(
         "restaurant_longitude": float(restaurant.longitude) if restaurant and restaurant.longitude is not None else None,
         "restaurant_hours": hours,
     }
+
+
+@router.post("/change-password")
+def change_manager_password(
+    payload: PasswordChangeRequest,
+    response: Response,
+    manager: User = Depends(current_manager),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    return change_password(payload, response, manager, db)
 
 
 @router.post("/logout")
