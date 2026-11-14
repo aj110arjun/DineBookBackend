@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.core.cloudinary import delete_file, upload_file
 from app.core.config import settings
 from app.core.email import send_branded_email
+from app.core.otp import verification_code_expired
 from app.core.phone import get_restaurant_phone_error
 from app.core.security import (
     create_access_token,
@@ -43,6 +44,10 @@ from app.services.notifications import create_notification
 from app.models.user import EmailVerificationCode
 from app.schemas.password_change import PasswordChangeRequest
 from app.services.password_change import change_password
+from app.services.manager_registration_verification import (
+    issue_registration_verification,
+    require_registration_verification,
+)
 
 
 router = APIRouter(
@@ -62,6 +67,13 @@ class ManagerEmailRequest(BaseModel):
 
 class ManagerEmailCodeRequest(ManagerEmailRequest):
     code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class ManagerEmailVerificationResponse(BaseModel):
+    message: str
+    email: EmailStr
+    verification_token: str
+    expires_at: datetime
 
 
 class ManagerLoginRequest(BaseModel):
@@ -87,7 +99,7 @@ def send_manager_verification_email(email: str, code: str) -> None:
 
 def issue_manager_verification_code(db: Session, email: str) -> None:
     code = f"{secrets.randbelow(1_000_000):06d}"
-    record = db.query(EmailVerificationCode).filter(EmailVerificationCode.email == email).first()
+    record = db.query(EmailVerificationCode).filter(EmailVerificationCode.email == email).with_for_update().first()
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=2)
     if record is None:
         record = EmailVerificationCode(email=email, code_hash=hash_password(code), expires_at=expires_at)
@@ -113,19 +125,24 @@ def send_manager_verification(payload: ManagerEmailRequest, db: Session = Depend
     return {"message": "A confirmation code has been sent."}
 
 
-@router.post("/verify-email")
-def verify_manager_email(payload: ManagerEmailCodeRequest, db: Session = Depends(get_db)) -> dict[str, str]:
+@router.post("/verify-email", response_model=ManagerEmailVerificationResponse)
+def verify_manager_email(payload: ManagerEmailCodeRequest, db: Session = Depends(get_db)) -> dict:
     email = str(payload.email).strip().lower()
     code = payload.code
-    verification = db.query(EmailVerificationCode).filter(EmailVerificationCode.email == email).first()
+    verification = db.query(EmailVerificationCode).filter(EmailVerificationCode.email == email).with_for_update().first()
     now = datetime.now(timezone.utc)
-    if verification is None or verification.expires_at.replace(tzinfo=timezone.utc) <= now:
+    if verification is None or verification_code_expired(verification.expires_at, now):
         raise HTTPException(status_code=400, detail="That confirmation code has expired. Request a new code.")
     if not verify_secret(code, verification.code_hash):
         raise HTTPException(status_code=400, detail="That confirmation code is incorrect.")
-    verification.code_hash = hash_password("manager-email-verified")
+    token, expires_at = issue_registration_verification(verification, now)
     db.commit()
-    return {"message": "Email address confirmed."}
+    return {
+        "message": "Email address confirmed.",
+        "email": email,
+        "verification_token": token,
+        "expires_at": expires_at,
+    }
 
 ACCESS_COOKIE = "dinebook_access_token"
 
@@ -231,6 +248,7 @@ async def register_manager(
     name: str = Form(...),
     email: EmailStr = Form(...),
     password: str = Form(...),
+    verification_token: str = Form(..., min_length=1, max_length=128),
 
     restaurant_name: str = Form(...),
     restaurant_description: str = Form(""),
@@ -357,16 +375,7 @@ async def register_manager(
             detail="An account with this email already exists.",
         )
 
-    verification = db.query(EmailVerificationCode).filter(EmailVerificationCode.email == email).first()
-    if (
-        verification is None
-        or verification.expires_at.replace(tzinfo=timezone.utc) <= datetime.now(timezone.utc)
-        or not verify_secret("manager-email-verified", verification.code_hash)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Verify your email address before submitting the application.",
-        )
+    verification = require_registration_verification(db, email, verification_token)
 
     manager = User(
         name=name,
