@@ -24,8 +24,13 @@ from app.models.revenue import PlatformCommission, PlatformCommissionPayout, Pla
 from app.models.restaurant_staff import RestaurantStaff
 from app.models.rate_limit import RateLimitBucket
 from app.models.customer_settings import CustomerSettings
+from app.models.customer_ai import CustomerAIConversation, CustomerAITurn, CustomerAIMessage, CustomerAIKnowledge
 
 __all__ = [
+    "CustomerAIConversation",
+    "CustomerAITurn",
+    "CustomerAIMessage",
+    "CustomerAIKnowledge",
     "CustomerSettings",
     "AccountStatus",
     "EmailVerificationCode",

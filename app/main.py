@@ -1,5 +1,6 @@
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -45,9 +46,19 @@ from app.routers.chef.chef_profile import router as chef_profile_router
 from app.routers.admin.admin_dashboard import router as admin_dashboard_router
 from app.routers.admin.admin_profile import router as admin_profile_router
 from app.routers.admin.admin_settings import router as admin_settings_router
+from app.routers.customer.customer_ai import router as customer_ai_router
+from app.services.ollama_service import ollama_service
 
 
-app = FastAPI(title="DineBook API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app):
+    try:
+        yield
+    finally:
+        await ollama_service.close()
+
+
+app = FastAPI(title="DineBook API", version="0.1.0", lifespan=lifespan)
 
 
 def apply_security_headers(response, request_id: str, duration_ms: float) -> None:
@@ -211,6 +222,7 @@ app.include_router(chef_operating_hours_router)
 app.include_router(admin_operating_hours_router)
 app.include_router(admin_profile_router)
 app.include_router(admin_settings_router)
+app.include_router(customer_ai_router)
 
 
 @app.get("/api/health", tags=["health"])
