@@ -3,7 +3,6 @@ import asyncio
 import json
 import uuid
 from dataclasses import dataclass
-from threading import BoundedSemaphore
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
@@ -22,11 +21,11 @@ from app.schemas.ai_chat import AIChatRequest, AIChatResponse, AIConversationCre
 from app.services.customer_ai_conversations import ConversationRepository
 from app.services.customer_ai_support import answer_customer
 from app.services.ollama_service import ollama_service
+from app.services.ai_support_runtime import turn_slots as _turn_slots
 
 router = APIRouter(prefix='/api/customer/ai', tags=['customer AI support'])
 # This application gate bounds CPU work; production must also cap the inference
 # server globally (OLLAMA_NUM_PARALLEL=1) when using multiple API workers.
-_turn_slots = BoundedSemaphore(1)
 
 
 @dataclass(frozen=True)
@@ -74,7 +73,8 @@ def storage_ready(context):
 async def support_status(context=Depends(support_customer)):
     return {'enabled': True, 'ready': await run_in_threadpool(storage_ready, context),
             'model_available': await ollama_service.available(), 'languages': ['auto', 'en', 'ml', 'hi'],
-            'max_message_length': 1000, 'support_url': settings.ai_support_contact_url}
+            'max_message_length': 1000, 'reply_timeout_seconds': settings.ai_support_turn_timeout_seconds + 5,
+            'support_url': settings.ai_support_contact_url}
 
 
 @router.post('/conversations', response_model=AIConversationView, status_code=201)

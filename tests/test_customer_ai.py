@@ -101,6 +101,14 @@ class CustomerAITests(unittest.TestCase):
             db.get(User, self.users["customer"].id).is_active = False; db.commit()
         self.assertEqual(self.request("GET", "/status").status_code, 401)
 
+    def test_status_distinguishes_offline_inference_from_available_storage(self):
+        response = self.request("GET", "/status")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ready"])
+        self.assertFalse(response.json()["model_available"])
+        self.assertEqual(response.json()["max_message_length"], 1000)
+        self.assertEqual(response.json()["reply_timeout_seconds"], settings.ai_support_turn_timeout_seconds + 5)
+
     def test_private_conversations_are_never_accessible_to_another_customer(self):
         conversation = self.conversation("other")
         for method, suffix, payload in (("GET", "", None), ("DELETE", "", None), ("POST", "/messages", {"message": "help"})):
