@@ -116,12 +116,19 @@ settings or credentials are exposed to the widget.
   place across workers, and introduce shared admission control before scaling.
 - If migrations are missing, APIs return a safe storage-unavailable error rather
   than creating tables at application startup.
-- The browser aborts requests on stop, close, account change or unmount. A dropped
+- The browser aborts requests on Stop, account change or unmount. Minimizing or
+  closing the panel preserves drafts, scroll position and a pending reply. A dropped
   stream can be retried with its original UUID to recover a completed answer.
+- The authenticated status response includes `reply_timeout_seconds` (the configured
+  turn deadline plus five seconds), so the browser respects CPU deployment limits.
+  Availability is checked on open; offline inference is shown as limited service,
+  with deterministic account/FAQ lookups still available. The chat clear button
+  deletes the current conversation directly. Frontend implementation and the isolated browser fixture
+  are documented in `../../DineBook/docs/customer-ai-ui.md`.
 - Password/OTP assignments, access tokens and contiguous card-number-shaped input
   are rejected. Users should still avoid entering sensitive information: pattern
   filtering cannot recognize every possible secret format.
-- Markdown rendering supports paragraphs, lists, bold and inline code as React
+- Markdown rendering supports paragraphs, bullet/numbered lists, bold and inline code as React
   text. Raw HTML, model-provided external links and remote images are not rendered.
 
 ## Validation

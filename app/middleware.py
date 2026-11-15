@@ -41,6 +41,8 @@ def rate_limit_for(path: str, method: str) -> RateLimit | None:
         return None
     if path.startswith("/api/customer/ai") and method == "POST":
         return RateLimit("customer-ai", 20)
+    if path.startswith("/api/manager/ai") and method == "POST":
+        return RateLimit("manager-ai", 20)
     if path.startswith("/api/auth/") and method == "POST":
         if path.endswith("/login"):
             return RateLimit("auth-login", 10)

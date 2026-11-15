@@ -47,6 +47,7 @@ from app.routers.admin.admin_dashboard import router as admin_dashboard_router
 from app.routers.admin.admin_profile import router as admin_profile_router
 from app.routers.admin.admin_settings import router as admin_settings_router
 from app.routers.customer.customer_ai import router as customer_ai_router
+from app.routers.manager.manager_ai import router as manager_ai_router
 from app.services.ollama_service import ollama_service
 
 
@@ -223,6 +224,7 @@ app.include_router(admin_operating_hours_router)
 app.include_router(admin_profile_router)
 app.include_router(admin_settings_router)
 app.include_router(customer_ai_router)
+app.include_router(manager_ai_router)
 
 
 @app.get("/api/health", tags=["health"])
