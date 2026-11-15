@@ -31,3 +31,5 @@ tests/*
 !tests/test_admin_settings.py
 !tests/test_password_change.py
 !tests/test_manager_registration_verification.py
+!tests/test_customer_ai.py
+!tests/test_ollama_service.py
