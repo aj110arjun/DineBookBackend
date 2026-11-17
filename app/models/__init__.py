@@ -7,7 +7,7 @@ from app.models.restaurant_document import (
 from app.models.restaurant_hours import RestaurantHours, RestaurantHoursException
 from app.models.menu import Category, Food, FoodImage, FoodVariant
 from app.models.user import AccountStatus, EmailVerificationCode, User, UserRole
-from app.models.dining import DiningTable, Floor, RestaurantFloor
+from app.models.dining import DiningTable, Floor, FloorZone, RestaurantFloor
 from app.models.reservation import Reservation, ReservationTable
 from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction, WalletTransfer
 from app.models.orders import FoodOrder
@@ -48,6 +48,7 @@ __all__ = [
     "FoodVariant",
     "Floor",
     "RestaurantFloor",
+    "FloorZone",
     "DiningTable",
     "Reservation",
     "ReservationTable",

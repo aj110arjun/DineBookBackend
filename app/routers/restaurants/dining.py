@@ -5,11 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from decimal import Decimal
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.services.table_availability import table_statuses, RESERVATION_DURATION
 from app.db.database import get_db
-from app.models.dining import DiningTable, DiningTableType, RestaurantFloor
+from app.models.dining import DiningTable, DiningTableType, FloorZone, RestaurantFloor
 from app.models.restaurant import Restaurant
 from app.models.user import User
 from app.routers.auth.admin_auth import current_admin
@@ -21,10 +21,32 @@ chef_router = APIRouter(prefix="/api/chef/floors", tags=["chef floors and tables
 admin_router = APIRouter(prefix="/api/admin/restaurants", tags=["admin floor and table oversight"])
 customer_router = APIRouter(prefix="/api/customer/restaurants", tags=["customer floor and table availability"])
 
+class ZoneRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=100)
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value):
+        value = " ".join(value.split())
+        if not value:
+            raise ValueError("Zone name is required.")
+        return value
+
+
 class FloorCreate(BaseModel):
     floor_number: int = Field(gt=0)
     floor_name: str = Field(min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=1000)
+    zones: list[str] = Field(default_factory=list, max_length=50)
+
+    @field_validator("zones")
+    @classmethod
+    def clean_zones(cls, values):
+        names = [ZoneRequest(name=value).name for value in values]
+        if len({name.casefold() for name in names}) != len(names):
+            raise ValueError("Zone names must be unique within a floor.")
+        return names
 
     @field_validator("floor_name")
     @classmethod
@@ -60,6 +82,7 @@ class FloorUpdate(BaseModel):
 
 class TableCreate(BaseModel):
     floor_id: uuid.UUID
+    zone_id: uuid.UUID | None = None
     table_number: str = Field(min_length=1, max_length=30)
     capacity: int = Field(gt=0, le=50)
     grid_row: int = Field(ge=0, le=100)
@@ -80,6 +103,7 @@ class TableCreate(BaseModel):
 
 class TableUpdate(BaseModel):
     floor_id: uuid.UUID | None = None
+    zone_id: uuid.UUID | None = None
     table_number: str | None = Field(default=None, min_length=1, max_length=30)
     capacity: int | None = Field(default=None, gt=0, le=50)
     grid_row: int | None = Field(default=None, ge=0, le=100)
@@ -91,7 +115,7 @@ class TableUpdate(BaseModel):
 
     @model_validator(mode="after")
     def reject_null_required_fields(self):
-        if any(getattr(self, key) is None for key in self.model_fields_set):
+        if any(getattr(self, key) is None for key in self.model_fields_set - {"zone_id"}):
             raise ValueError("Table fields cannot be null; omit fields you do not want to change.")
         return self
 
@@ -119,6 +143,7 @@ def floor_data(floor: RestaurantFloor, tables: list[DiningTable] | None = None, 
         "floor_number": floor.floor_number, "floor_name": floor.floor_name,
         "name": floor.floor_name, "description": floor.description,
         "is_active": floor.is_active,
+        "zones": [zone_data(zone) for zone in floor.zones],
         "tables": [table_data(table) for table in (tables if tables is not None else floor.tables) if include_inactive or table.status != "inactive"],
     }
 
@@ -126,6 +151,8 @@ def floor_data(floor: RestaurantFloor, tables: list[DiningTable] | None = None, 
 def table_data(table: DiningTable) -> dict:
     return {
         "id": str(table.id), "floor_id": str(table.floor_id),
+        "zone_id": str(table.zone_id) if table.zone_id else None,
+        "zone_name": table.zone.name if table.zone else None,
         "table_number": table.table_number, "capacity": table.capacity,
         "seats": table.capacity, "table_type": table.table_type.value, "status": table.status,
         "reservation_fee": float(table.reservation_fee or 0),
@@ -134,8 +161,13 @@ def table_data(table: DiningTable) -> dict:
     }
 
 
+def zone_data(zone: FloorZone) -> dict:
+    return {"id": str(zone.id), "floor_id": str(zone.floor_id), "name": zone.name}
+
+
 def list_floor_data(restaurant_id: uuid.UUID, db: Session, include_inactive_tables: bool = False) -> list[dict]:
-    floors = (db.query(RestaurantFloor).filter(
+    floors = (db.query(RestaurantFloor).options(selectinload(RestaurantFloor.zones),
+        selectinload(RestaurantFloor.tables).selectinload(DiningTable.zone)).filter(
         RestaurantFloor.restaurant_id == restaurant_id, RestaurantFloor.is_active.is_(True)
     ).order_by(RestaurantFloor.floor_number).all())
     return [floor_data(floor, include_inactive=include_inactive_tables) for floor in floors]
@@ -158,8 +190,18 @@ def owned_table(table_id: uuid.UUID, restaurant_id: uuid.UUID, db: Session) -> D
     return table
 
 
+def owned_zone(zone_id: uuid.UUID, floor_id: uuid.UUID, restaurant_id: uuid.UUID, db: Session) -> FloorZone:
+    owned_floor(floor_id, restaurant_id, db)
+    zone = db.query(FloorZone).filter(FloorZone.id == zone_id, FloorZone.floor_id == floor_id).first()
+    if zone is None:
+        raise HTTPException(404, "Zone not found on the selected floor.")
+    return zone
+
+
 def duplicate_error(exc: IntegrityError) -> HTTPException:
     message = str(getattr(exc, "orig", exc)).lower()
+    if "uq_floor_zones_name" in message:
+        return HTTPException(409, "This zone name is already used on the selected floor.")
     if "uq_floors_restaurant_number" in message:
         return HTTPException(status_code=409, detail="This floor number is already used in your restaurant.")
     if "uq_dining_tables_grid_position" in message:
@@ -178,7 +220,9 @@ def manager_floors(manager: User = Depends(current_manager), db: Session = Depen
 @manager_router.post("/floors", status_code=status.HTTP_201_CREATED)
 def create_floor(payload: FloorCreate, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
     restaurant = get_manager_restaurant(manager, db)
-    floor = RestaurantFloor(restaurant_id=restaurant.id, **payload.model_dump())
+    values = payload.model_dump(exclude={"zones"})
+    floor = RestaurantFloor(restaurant_id=restaurant.id, **values)
+    floor.zones = [FloorZone(name=name) for name in payload.zones]
     db.add(floor)
     try:
         db.commit()
@@ -224,6 +268,50 @@ def delete_floor(floor_id: uuid.UUID, manager: User = Depends(current_manager), 
     return {"message": "Floor deactivated."}
 
 
+@manager_router.post("/floors/{floor_id}/zones", status_code=status.HTTP_201_CREATED)
+def create_zone(floor_id: uuid.UUID, payload: ZoneRequest, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
+    restaurant = get_manager_restaurant(manager, db)
+    owned_floor(floor_id, restaurant.id, db)
+    zone = FloorZone(floor_id=floor_id, name=payload.name)
+    db.add(zone)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise duplicate_error(exc)
+    db.refresh(zone)
+    return zone_data(zone)
+
+
+@manager_router.patch("/floors/{floor_id}/zones/{zone_id}")
+def update_zone(floor_id: uuid.UUID, zone_id: uuid.UUID, payload: ZoneRequest, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
+    restaurant = get_manager_restaurant(manager, db)
+    zone = owned_zone(zone_id, floor_id, restaurant.id, db)
+    zone.name = payload.name
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise duplicate_error(exc)
+    db.refresh(zone)
+    return zone_data(zone)
+
+
+@manager_router.delete("/floors/{floor_id}/zones/{zone_id}")
+def delete_zone(floor_id: uuid.UUID, zone_id: uuid.UUID, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
+    restaurant = get_manager_restaurant(manager, db)
+    zone = owned_zone(zone_id, floor_id, restaurant.id, db)
+    if db.query(DiningTable.id).filter(DiningTable.zone_id == zone.id).first():
+        raise HTTPException(409, "Move this zone's tables to another zone or general seating before deleting it.")
+    db.delete(zone)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Move this zone's tables before deleting it.")
+    return {"message": "Zone deleted."}
+
+
 @manager_router.get("/tables")
 def manager_tables(floor_id: uuid.UUID | None = Query(default=None), manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> list[dict]:
     restaurant = get_manager_restaurant(manager, db)
@@ -241,6 +329,8 @@ def manager_tables(floor_id: uuid.UUID | None = Query(default=None), manager: Us
 def create_table(payload: TableCreate, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
     restaurant = get_manager_restaurant(manager, db)
     owned_floor(payload.floor_id, restaurant.id, db)
+    if payload.zone_id is not None:
+        owned_zone(payload.zone_id, payload.floor_id, restaurant.id, db)
     table = DiningTable(restaurant_id=restaurant.id, **payload.model_dump())
     db.add(table)
     try:
@@ -267,6 +357,11 @@ def update_table(table_id: uuid.UUID, payload: TableUpdate, manager: User = Depe
     changes = payload.model_dump(exclude_unset=True)
     target_floor = changes.get("floor_id", table.floor_id)
     owned_floor(target_floor, restaurant.id, db)
+    if target_floor != table.floor_id and "zone_id" not in changes:
+        changes["zone_id"] = None
+    target_zone = changes.get("zone_id", table.zone_id)
+    if target_zone is not None:
+        owned_zone(target_zone, target_floor, restaurant.id, db)
     for key, value in changes.items():
         setattr(table, key, value)
     table.updated_at = datetime.now(timezone.utc)
