@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import String, and_, cast, func, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.db.database import get_db
 from app.core.config import settings
@@ -158,7 +158,8 @@ class ReservationPaymentVerification(BaseModel):
 def reservation_data(item: Reservation, db: Session, include_orders: bool = True) -> dict:
     customer = db.query(User).filter(User.id == item.user_id).first()
     restaurant = db.query(Restaurant).filter(Restaurant.id == item.restaurant_id).first()
-    assignments = db.query(ReservationTable).options(joinedload(ReservationTable.table).joinedload(DiningTable.floor)).filter(ReservationTable.reservation_id == item.id).all()
+    assignments = db.query(ReservationTable).options(joinedload(ReservationTable.table).joinedload(DiningTable.floor),
+        joinedload(ReservationTable.table).joinedload(DiningTable.zone)).filter(ReservationTable.reservation_id == item.id).all()
     food_orders = db.query(FoodOrder).filter(FoodOrder.reservation_id == item.id).order_by(FoodOrder.created_at.asc()).all() if include_orders else []
     preorder_payment_method = item.preorder_payment_method
     preorder_payment_status = item.preorder_payment_status
@@ -215,6 +216,8 @@ def reservation_data(item: Reservation, db: Session, include_orders: bool = True
                         for order in food_orders],
         "tables": [{"id": str(a.table.id), "table_number": a.table.table_number,
                     "capacity": a.table.capacity, "reservation_fee": float(a.table.reservation_fee), "floor_id": str(a.table.floor_id),
+                    "zone_id": str(a.table.zone_id) if a.table.zone_id else None,
+                    "zone_name": a.table.zone.name if a.table.zone else None,
                     "floor_name": a.table.floor.floor_name} for a in assignments],
     }
 
@@ -270,6 +273,7 @@ def suitable_table_groups(
 
     query = (
         db.query(DiningTable)
+        .options(selectinload(DiningTable.zone))
         .join(
             RestaurantFloor,
             DiningTable.floor_id == RestaurantFloor.id,
@@ -302,6 +306,7 @@ def suitable_table_groups(
 
 def table_group_data(group: tuple[DiningTable, ...], duration_minutes: int = 90) -> dict:
     floor_names = list(dict.fromkeys(table.floor.floor_name for table in group))
+    zone_names = list(dict.fromkeys(table.zone.name for table in group if table.zone))
     table_types = [getattr(table.table_type, "value", table.table_type) for table in group]
     fee_quote = reservation_fee_quote(group, duration_minutes)
     return {
@@ -309,6 +314,8 @@ def table_group_data(group: tuple[DiningTable, ...], duration_minutes: int = 90)
         "table_ids": [str(table.id) for table in group],
         "table_number": " + ".join(table.table_number for table in group),
         "floor_name": " / ".join(floor_names),
+        "zone_id": str(group[0].zone_id) if len({table.zone_id for table in group}) == 1 and group[0].zone_id else None,
+        "zone_name": " / ".join(zone_names) or None,
         "capacity": sum(table.capacity for table in group),
         "table_type": " + ".join(table_types),
         "reservation_fee": float(fee_quote["base_fee_amount"]),
@@ -327,6 +334,7 @@ def floor_layout_data(
 
     tables = (
         db.query(DiningTable)
+        .options(selectinload(DiningTable.zone))
         .join(
             RestaurantFloor,
             DiningTable.floor_id == RestaurantFloor.id,

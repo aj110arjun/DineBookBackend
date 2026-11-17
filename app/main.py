@@ -38,12 +38,14 @@ from app.routers.customer.customer_settings import router as customer_settings_r
 from app.routers.restaurants.reviews import customer_router as customer_reviews_router, public_router as public_reviews_router, chef_router as chef_reviews_router, manager_router as manager_reviews_router, admin_router as admin_reviews_router
 from app.routers.commerce.revenue import admin_router as admin_revenue_router, manager_router as manager_revenue_router, chef_router as chef_revenue_router
 from app.routers.manager.manager_dashboard import router as manager_dashboard_router
+from app.routers.manager.manager_ledger import router as manager_ledger_router
 from app.routers.manager.manager_settings import router as manager_settings_router
 from app.routers.manager.manager_profile import router as manager_profile_router
 from app.routers.chef.chef_dashboard import router as chef_dashboard_router
 from app.routers.chef.chef_settings import router as chef_settings_router
 from app.routers.chef.chef_profile import router as chef_profile_router
 from app.routers.admin.admin_dashboard import router as admin_dashboard_router
+from app.routers.admin.admin_ledger import router as admin_ledger_router
 from app.routers.admin.admin_profile import router as admin_profile_router
 from app.routers.admin.admin_settings import router as admin_settings_router
 from app.routers.customer.customer_ai import router as customer_ai_router
@@ -173,6 +175,7 @@ app.include_router(manager_auth_router)
 app.include_router(manager_staff_router)
 app.include_router(manager_menu_router)
 app.include_router(manager_dashboard_router)
+app.include_router(manager_ledger_router)
 app.include_router(manager_settings_router)
 app.include_router(manager_profile_router)
 app.include_router(chef_auth_router)
@@ -181,6 +184,7 @@ app.include_router(chef_dashboard_router)
 app.include_router(chef_settings_router)
 app.include_router(chef_profile_router)
 app.include_router(admin_dashboard_router)
+app.include_router(admin_ledger_router)
 app.include_router(admin_managers_router)
 app.include_router(admin_restaurants_router)
 app.include_router(manager_dining_router)

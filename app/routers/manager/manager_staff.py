@@ -61,6 +61,7 @@ def chef_dict(chef: User) -> dict:
         "id": str(chef.id),
         "name": chef.name,
         "email": chef.email,
+        "avatar_url": chef.avatar_url,
         "role": chef.role.value,
         "status": chef.status.value,
         "is_active": chef.is_active,
