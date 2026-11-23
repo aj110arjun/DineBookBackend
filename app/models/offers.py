@@ -50,6 +50,7 @@ class FoodOrderOffer(Base):
             "applicability IN ('RESTAURANT', 'ITEMS', 'CATEGORIES')",
             name="ck_food_order_offer_applicability",
         ),
+        CheckConstraint("application_mode IN ('AUTOMATIC', 'COUPON')", name="ck_food_order_offer_application_mode"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -63,6 +64,9 @@ class FoodOrderOffer(Base):
     )
     code: Mapped[str] = mapped_column(
         String(40), nullable=False
+    )
+    application_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="AUTOMATIC", server_default="AUTOMATIC"
     )
     title: Mapped[str] = mapped_column(
         String(120), nullable=False, default="Offer"
@@ -190,7 +194,7 @@ class OfferRedemption(Base):
     __tablename__ = "offer_redemptions"
     __table_args__ = (
         UniqueConstraint(
-            "order_id", name="uq_offer_redemptions_order"
+            "order_id", "offer_id", name="uq_offer_redemptions_order_offer"
         ),
         Index(
             "ix_offer_redemptions_offer_customer",

@@ -2,9 +2,10 @@ import uuid
 from decimal import Decimal
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.database import get_db
@@ -117,13 +118,40 @@ def apply_food_payload(food: Food, payload: FoodPayload) -> None:
 
 
 @router.get("")
-def list_menu(manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> list[dict]:
+def list_menu(search: str = Query(default="", max_length=100), manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> list[dict]:
     restaurant = owned_restaurant(manager, db)
+    search_value = " ".join(search.split())
+    matching_food_ids = None
+    if search_value:
+        escaped = search_value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        term = f"%{escaped}%"
+        matching_food_ids = {
+            row[0] for row in db.query(Food.id).outerjoin(
+                FoodVariant,
+                and_(FoodVariant.food_id == Food.id, FoodVariant.deleted_at.is_(None)),
+            ).filter(
+                Food.restaurant_id == restaurant.id,
+                Food.deleted_at.is_(None),
+                or_(
+                    Food.name.ilike(term, escape="\\"),
+                    Food.description.ilike(term, escape="\\"),
+                    FoodVariant.name.ilike(term, escape="\\"),
+                ),
+            ).distinct().all()
+        }
     categories = (
         db.query(Category).options(selectinload(Category.foods).selectinload(Food.variants), selectinload(Category.foods).selectinload(Food.image))
         .filter(Category.restaurant_id == restaurant.id, Category.deleted_at.is_(None)).order_by(Category.display_order, Category.name).all()
     )
-    return [category_dict(category, include_food=True, restaurant_name=restaurant.name) for category in categories]
+    result = []
+    for category in categories:
+        data = category_dict(category, include_food=True, restaurant_name=restaurant.name)
+        if matching_food_ids is not None:
+            data["foods"] = [food for food in data["foods"] if uuid.UUID(food["id"]) in matching_food_ids]
+            if not data["foods"]:
+                continue
+        result.append(data)
+    return result
 
 
 @router.post("/categories", status_code=status.HTTP_201_CREATED)
