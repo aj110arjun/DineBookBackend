@@ -80,7 +80,7 @@ API request middleware counts body bytes as they arrive, rejects unsupported HTT
 | `RAZORPAY_WEBHOOK_PREVIOUS_SECRET` | Optional previous secret during webhook secret rotation; remove after old retries have expired |
 | `ORDER_TAX_PERCENT` | GST percentage applied to food-order totals after discounts; defaults to `18` |
 
-For ngrok development, expose the Vite frontend and set `FRONTEND_PUBLIC_URL` to that origin. Vite proxies `/api` to the local backend. Add the local and public callback URLs to the Google OAuth client when using Google sign-in; the local callback is `http://localhost:8000/api/auth/customer/google/callback`.
+For Google sign-in, add the frontend callback URL to the OAuth client's authorized redirect URIs. With the local Vite server, add `http://localhost:5173/api/auth/customer/google/callback`; for an ngrok deployment, use the equivalent `https://<your-subdomain>.ngrok-free.dev/...` URL. The callback is intentionally served through the frontend's `/api` proxy so the sign-in cookie remains same-origin. DineBook requests only the standard `openid`, `email`, and `profile` identity scopes; it does not access a user's Google Calendar.
 
 ## API capabilities
 

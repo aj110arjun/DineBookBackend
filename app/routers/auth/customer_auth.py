@@ -216,6 +216,9 @@ def google_login(request: Request):
         "client_id": settings.google_client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
+        # Keep Google authentication limited to identity data. In particular,
+        # do not request Calendar access here: that sensitive scope makes a
+        # testing OAuth app inaccessible to ordinary Google sign-in users.
         "scope": "openid email profile",
         "state": state,
         "prompt": "select_account",
@@ -289,7 +292,8 @@ if (window.opener) {{
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         with urllib.request.urlopen(token_request, timeout=10) as result:
-            access_token = json.loads(result.read()).get("access_token")
+            token_data = json.loads(result.read())
+        access_token = token_data.get("access_token")
         if not access_token:
             raise ValueError("Missing Google access token")
         profile_request = urllib.request.Request(

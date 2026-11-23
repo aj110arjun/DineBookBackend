@@ -173,7 +173,12 @@ def reservation_data(item: Reservation, db: Session, include_orders: bool = True
         "restaurant_email": restaurant.email if restaurant else None,
         "restaurant_phone": restaurant.phone if restaurant else None,
         "customer_name": customer.name if customer else "Customer",
-        "customer_email": customer.email if customer else None, "reservation_date": item.reservation_date.strftime('%d %B %Y'),
+        "customer_email": customer.email if customer else None,
+        "customer_avatar_url": customer.avatar_url if customer else None,
+        # Preserve the display label while exposing an unambiguous value for
+        # calendar state, filters, and API requests.
+        "reservation_date": item.reservation_date.strftime('%d %B %Y'),
+        "reservation_date_iso": item.reservation_date.isoformat(),
         "start_time": item.start_time.strftime("%H:%M"), "end_time": item.end_time.strftime("%H:%M"),
         "number_of_guests": item.number_of_guests, "status": item.status,
         "created_at": item.created_at.strftime('%d %B %Y') if item.created_at else None,
@@ -217,6 +222,17 @@ def reservation_data(item: Reservation, db: Session, include_orders: bool = True
                     "capacity": a.table.capacity, "reservation_fee": float(a.table.reservation_fee), "floor_id": str(a.table.floor_id),
                     "floor_name": a.table.floor.floor_name} for a in assignments],
     }
+
+
+def reservation_code_prefix(value: str) -> str | None:
+    """Normalize an ID prefix or customer-facing ``RES-…`` reservation code."""
+    normalized = value.strip().lower()
+    if normalized.startswith("res-"):
+        normalized = normalized[4:]
+    normalized = normalized.replace("-", "")
+    if len(normalized) >= 6 and all(char in "0123456789abcdef" for char in normalized):
+        return normalized
+    return None
 
 
 def overlapping(db: Session, table_id: uuid.UUID, day: date, start: time, end: time) -> bool:
@@ -975,8 +991,8 @@ def manager_calendar_activities(
 
     restaurant = restaurant_for_staff(manager, db)
     search_value = search.strip()
-    normalized_id = search_value.replace("-", "").lower()
-    is_reservation_id_lookup = len(normalized_id) >= 6 and all(char in "0123456789abcdef" for char in normalized_id)
+    normalized_id = reservation_code_prefix(search_value)
+    is_reservation_id_lookup = normalized_id is not None
 
     reservation_query = db.query(Reservation).filter(Reservation.restaurant_id == restaurant.id)
     if not is_reservation_id_lookup:
@@ -1026,7 +1042,9 @@ def manager_calendar_activities(
         reservation_query = reservation_query.order_by(Reservation.start_time.asc())
     reservation_rows = reservation_query.offset((page - 1) * page_size).limit(page_size).all()
     reservation_items = [reservation_data(item, db, include_orders=False) for item in reservation_rows]
-    reservation_lookup_date = reservation_items[0]["reservation_date"] if is_reservation_id_lookup and reservation_items else None
+    # reservation_date is a human-readable label (for example, "23 November
+    # 2026"). The date strip and FastAPI's day query must receive ISO 8601.
+    reservation_lookup_date = reservation_rows[0].reservation_date.isoformat() if is_reservation_id_lookup and reservation_rows else None
 
     local_start = datetime.combine(day, time.min, tzinfo=RESTAURANT_TIMEZONE).astimezone(timezone.utc)
     local_end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=RESTAURANT_TIMEZONE).astimezone(timezone.utc)
@@ -1183,7 +1201,8 @@ def manager_add_preorder_items(reservation_id: uuid.UUID, payload: ManagerPreord
 
 
 @manager_router.post("/{reservation_id}/confirm-payment")
-def manager_confirm_payment(reservation_id: uuid.UUID, manager: User = Depends(current_manager), db: Session = Depends(get_db)) -> dict:
+def manager_confirm_payment(reservation_id: uuid.UUID, manager: User = Depends(current_manager), db: Session = Depends(get_db),
+                            background_tasks: BackgroundTasks = None) -> dict:
     restaurant = restaurant_for_staff(manager, db)
     item = db.query(Reservation).filter(Reservation.id == reservation_id, Reservation.restaurant_id == restaurant.id).with_for_update().first()
     if item is None:
