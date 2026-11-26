@@ -691,7 +691,11 @@ def queue_reservation_preorder(db: Session, reservation: Reservation, manager: U
         payment_method=payment_method or "PAY_AT_DESK",
         payment_status=payment_status,
         paid_at=datetime.now(timezone.utc) if payment_status == "PAID" else None,
-        customer_note="Reservation preorder",
+        customer_note=(
+            reservation.special_request.strip()[:500]
+            if reservation.special_request and reservation.special_request.strip()
+            else "Reservation preorder"
+        ),
     )
     db.add(order)
     db.flush()
