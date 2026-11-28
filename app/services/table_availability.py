@@ -2,10 +2,14 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from app.models.reservation import Reservation, ReservationTable
+from app.models.reservation import (
+    BLOCKING_RESERVATION_STATUSES,
+    Reservation,
+    ReservationStatus,
+    ReservationTable,
+)
 
 RESTAURANT_TIMEZONE = ZoneInfo("Asia/Kolkata")
-BLOCKING = ("PENDING_PAYMENT", "CONFIRMED", "SEATED")
 RESERVATION_DURATION = timedelta(minutes=90)
 
 
@@ -22,7 +26,7 @@ def table_statuses(db, tables, day, start, end):
             Reservation, Reservation.id == ReservationTable.reservation_id
         ).filter(
             ReservationTable.table_id.in_(table_ids),
-            Reservation.status.in_(BLOCKING),
+            Reservation.status.in_(BLOCKING_RESERVATION_STATUSES),
             Reservation.reservation_date >= day - timedelta(days=1),
             Reservation.reservation_date <= finishes.date(),
         ).all()
@@ -32,7 +36,7 @@ def table_statuses(db, tables, day, start, end):
             if booking_end <= booking_start:
                 booking_end += timedelta(days=1)
             if booking_start < finishes and booking_end > begins:
-                status = "occupied" if booking.status == "SEATED" else "reserved"
+                status = "occupied" if booking.status == ReservationStatus.SEATED else "reserved"
                 if blocked.get(table_id) != "occupied":
                     blocked[table_id] = status
     result = {}

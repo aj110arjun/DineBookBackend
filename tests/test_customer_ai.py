@@ -136,6 +136,28 @@ class CustomerAITests(unittest.TestCase):
                 self.assertNotIn("\n\n", answer["reply"])
                 self.assertNotIn("currently recorded", answer["reply"])
 
+    def test_clear_reservation_question_uses_account_lookup_instead_of_faq_fallback(self):
+        result = self.send(None, "Show me the 5 reservations in test restaurant 1")
+
+        self.assertEqual(result.status_code, 200, result.text)
+        answer = result.json()
+        self.assertEqual(answer["reply"], "Here are your latest bookings.")
+        self.assertEqual(len(answer["cards"]), 1)
+        self.chat.assert_not_awaited()
+
+    def test_selected_action_is_not_overridden_by_model_classification(self):
+        self.chat.side_effect = None
+        self.chat.return_value = json.dumps({
+            "plan": AIPlan(action="faq").model_dump(mode="json"),
+            "faq_answer": "",
+        })
+
+        result = self.send("reservations", "Show my reservations")
+
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["reply"], "Here are your latest bookings.")
+        self.chat.assert_not_awaited()
+
     def test_offer_lookup_asks_for_only_the_restaurant_before_showing_offers(self):
         result = self.send("offers", "Restaurant offers")
         self.assertEqual(result.status_code, 200, result.text)
@@ -203,6 +225,42 @@ class CustomerAITests(unittest.TestCase):
         result = self.send(None, "Hello, how does my account work?")
         self.assertEqual(result.status_code, 200)
         self.assertTrue(result.json()["limited"])
+
+    def test_faq_rag_generates_grounded_reply_from_retrieved_sources(self):
+        self.chat.side_effect = None
+        self.chat.return_value = json.dumps({
+            "plan": AIPlan(action="faq").model_dump(mode="json"),
+            "faq_answer": "A wallet refund is recorded as a wallet credit, not a bank refund.",
+        })
+
+        result = self.send("faq", "How do I get my money back?")
+
+        self.assertEqual(result.status_code, 200, result.text)
+        answer = result.json()
+        self.assertEqual(
+            answer["reply"],
+            "A wallet refund is recorded as a wallet credit, not a bank refund.",
+        )
+        self.assertTrue(any(source["id"].startswith("faq:refunds:") for source in answer["sources"]))
+        self.chat.assert_awaited_once()
+        prompt = self.chat.await_args.args[0][-1]["content"]
+        self.assertIn("Cancellation and refund options", prompt)
+        self.assertIn("Customer message:", prompt)
+
+    def test_faq_rag_does_not_return_unrelated_articles_when_model_finds_no_answer(self):
+        self.chat.side_effect = None
+        self.chat.return_value = json.dumps({
+            "plan": AIPlan(action="faq").model_dump(mode="json"),
+            "faq_answer": "",
+        })
+
+        result = self.send("faq", "How do I get my money back?")
+
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(
+            result.json()["reply"],
+            "What can I help with? Ask about bookings, orders, your wallet, or a restaurant.",
+        )
 
     def test_stream_finishes_with_validated_cards_and_no_reasoning(self):
         conversation = self.conversation()

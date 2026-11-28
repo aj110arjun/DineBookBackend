@@ -10,8 +10,13 @@ from decimal import Decimal
 from sqlalchemy import String, and_, case, cast, func, literal, or_, select, union_all
 
 from app.models.notifications import Notification
-from app.models.orders import FoodOrder
-from app.models.reservation import Reservation
+from app.models.orders import FoodOrder, OrderStatus
+from app.models.payment_values import PaymentSource, PaymentStatus
+from app.models.reservation import (
+    PENDING_OR_CONFIRMED_RESERVATION_STATUSES,
+    Reservation,
+    ReservationStatus,
+)
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.revenue import PlatformCommission as PC, PlatformCommissionPayout as Payout
 from app.models.user import User, UserRole
@@ -40,8 +45,8 @@ def period(params):
     group = params.group_by
     if group == "auto":
         group = "day" if days <= 90 else "week" if days <= 366 else "month" if days <= 1464 else "year"
-    return dict(start_date=params.start_date, end_date=params.end_date,
-                timezone=str(RESTAURANT_TIMEZONE), group_by=group)
+    return {"start_date": params.start_date, "end_date": params.end_date,
+            "timezone": str(RESTAURANT_TIMEZONE), "group_by": group}
 
 
 def bounds(params):
@@ -123,20 +128,26 @@ def operations(db, params, *, reservations=False, now=None):
         statuses[status] = statuses.get(status, 0) + count
         point = chart[day]
         point["total"] += count
-        point["completed" if status == "COMPLETED" else "cancelled" if status in (*CANCELLED, "NO_SHOW") else "pending"] += count
-    result = dict(total=sum(statuses.values()), completed=statuses["COMPLETED"],
+        point["completed" if status == OrderStatus.COMPLETED else "cancelled"
+              if status in (*CANCELLED, ReservationStatus.NO_SHOW) else "pending"] += count
+    result = dict(total=sum(statuses.values()), completed=statuses[OrderStatus.COMPLETED.value],
                   cancelled=sum(statuses[s] for s in CANCELLED),
                   statuses=[dict(status=s, count=c) for s, c in statuses.items()], trend=list(chart.values()))
     if reservations:
         local_now = (now or datetime.now(timezone.utc)).astimezone(RESTAURANT_TIMEZONE)
         upcoming = db.query(func.count(Reservation.id)).filter(selected,
-            Reservation.status.in_(("PENDING_PAYMENT", "CONFIRMED")),
+            Reservation.status.in_(PENDING_OR_CONFIRMED_RESERVATION_STATUSES),
             or_(Reservation.reservation_date > local_now.date(),
                 and_(Reservation.reservation_date == local_now.date(), Reservation.start_time >= local_now.time().replace(tzinfo=None)))).scalar()
-        result.update(upcoming=upcoming, no_show=statuses["NO_SHOW"])
+        result.update(upcoming=upcoming, no_show=statuses[ReservationStatus.NO_SHOW.value])
     else:
-        result.update(pending=statuses["PLACED"] + statuses["ACCEPTED"], preparing=statuses["PREPARING"],
-                      refunded=db.query(func.count(FoodOrder.id)).filter(selected, FoodOrder.payment_status == "REFUNDED").scalar())
+        result.update(
+            pending=statuses[OrderStatus.PLACED.value] + statuses[OrderStatus.ACCEPTED.value],
+            preparing=statuses[OrderStatus.PREPARING.value],
+            refunded=db.query(func.count(FoodOrder.id)).filter(
+                selected, FoodOrder.payment_status == PaymentStatus.REFUNDED
+            ).scalar(),
+        )
     return result
 
 
@@ -144,9 +155,12 @@ def customer_activity():
     # Generated kitchen preorders represent the same reservation interaction.
     return union_all(
         select(FoodOrder.customer_id.label("customer"), FoodOrder.created_at.label("at")).where(
-            FoodOrder.customer_id.is_not(None), FoodOrder.status.notin_(CANCELLED), FoodOrder.payment_status != "REFUNDED",
+            FoodOrder.customer_id.is_not(None), FoodOrder.status.notin_(CANCELLED),
+            FoodOrder.payment_status != PaymentStatus.REFUNDED,
             ~generated_preorder()),
-        select(Reservation.user_id, Reservation.created_at).where(Reservation.status.in_(("CONFIRMED", "SEATED", "COMPLETED"))),
+        select(Reservation.user_id, Reservation.created_at).where(
+            Reservation.status.in_((ReservationStatus.CONFIRMED, ReservationStatus.SEATED, ReservationStatus.COMPLETED))
+        ),
     ).subquery()
 
 
@@ -184,20 +198,20 @@ def payment_sources():
         return select(literal(source).label("source_type"), model.id.label("source_id"),
                       amount.label("amount"), method.label("method"), status.label("status"), at.label("created_at"))
     return union_all(
-        record("FOOD_ORDER", FoodOrder, FoodOrder.total, FoodOrder.payment_method, FoodOrder.payment_status, FoodOrder.created_at).where(~generated_preorder()),
-        record("RESERVATION_FEE", Reservation, Reservation.fee_amount, Reservation.payment_method, Reservation.payment_status, Reservation.created_at).where(Reservation.fee_amount > 0),
-        record("PREORDER", Reservation, Reservation.preorder_total, Reservation.preorder_payment_method, Reservation.preorder_payment_status, Reservation.created_at).where(Reservation.preorder_total > 0),
+        record(PaymentSource.FOOD_ORDER.value, FoodOrder, FoodOrder.total, FoodOrder.payment_method, FoodOrder.payment_status, FoodOrder.created_at).where(~generated_preorder()),
+        record(PaymentSource.RESERVATION_FEE.value, Reservation, Reservation.fee_amount, Reservation.payment_method, Reservation.payment_status, Reservation.created_at).where(Reservation.fee_amount > 0),
+        record(PaymentSource.PREORDER.value, Reservation, Reservation.preorder_total, Reservation.preorder_payment_method, Reservation.preorder_payment_status, Reservation.created_at).where(Reservation.preorder_total > 0),
     ).subquery()
 
 
 def payment_ledger():
     # One row per immutable payment source; no fan-out into wallet entries.
-    method = case((PC.source_type == "FOOD_ORDER", FoodOrder.payment_method),
-                  (PC.source_type == "RESERVATION_FEE", Reservation.payment_method),
-                  (PC.source_type == "PREORDER", Reservation.preorder_payment_method), else_="UNKNOWN")
+    method = case((PC.source_type == PaymentSource.FOOD_ORDER.value, FoodOrder.payment_method),
+                  (PC.source_type == PaymentSource.RESERVATION_FEE.value, Reservation.payment_method),
+                  (PC.source_type == PaymentSource.PREORDER.value, Reservation.preorder_payment_method), else_="UNKNOWN")
     return select(PC.id, PC.occurred_at, PC.gross_amount, func.coalesce(method, "UNKNOWN").label("method")).select_from(PC).outerjoin(
-        FoodOrder, and_(PC.source_type == "FOOD_ORDER", PC.source_id == FoodOrder.id)).outerjoin(
-        Reservation, and_(PC.source_type.in_(("RESERVATION_FEE", "PREORDER")), PC.source_id == Reservation.id)).where(
+        FoodOrder, and_(PC.source_type == PaymentSource.FOOD_ORDER.value, PC.source_id == FoodOrder.id)).outerjoin(
+        Reservation, and_(PC.source_type.in_((PaymentSource.RESERVATION_FEE.value, PaymentSource.PREORDER.value)), PC.source_id == Reservation.id)).where(
             PC.source_type.in_(PAYMENT_SOURCES)).subquery()
 
 
@@ -207,13 +221,19 @@ def payments(db, params, revenue_summary=None):
         scope(ledger.c.occurred_at, params)).group_by(ledger.c.method).all()
     channels = [dict(method=method, count=count, amount=money(amount)) for method, count, amount in rows]
     sources = payment_sources()
-    states = {"PENDING": dict(count=0, amount=ZERO), "FAILED": dict(count=0, amount=ZERO)}
+    states = {
+        PaymentStatus.PENDING.value: dict(count=0, amount=ZERO),
+        PaymentStatus.FAILED.value: dict(count=0, amount=ZERO),
+    }
     for status, count, amount in db.query(sources.c.status, func.count(), func.sum(sources.c.amount)).filter(
             scope(sources.c.created_at, params), sources.c.status.in_(states)).group_by(sources.c.status).all():
         states[status] = dict(count=count, amount=money(amount))
     has_ledger = select(PC.id).where(PC.source_type == sources.c.source_type, PC.source_id == sources.c.source_id).exists()
     unledgered = db.query(func.count(), func.coalesce(func.sum(sources.c.amount), 0)).filter(
-        scope(sources.c.created_at, params), sources.c.status.in_(("PAID", "REFUNDED")), ~has_ledger).one()
+        scope(sources.c.created_at, params),
+        sources.c.status.in_((PaymentStatus.PAID.value, PaymentStatus.REFUNDED.value)),
+        ~has_ledger,
+    ).one()
     wallets = []
     for role, accounts, balance, positive, negative in db.query(User.role, func.count(WalletAccount.user_id),
             func.sum(WalletAccount.balance), func.sum(case((WalletAccount.balance > 0, WalletAccount.balance), else_=0)),
@@ -221,7 +241,7 @@ def payments(db, params, revenue_summary=None):
                 User, User.id == WalletAccount.user_id).group_by(User.role).all():
         wallets.append(dict(role=role.value, accounts=accounts, balance=money(balance), positive_balances=money(positive), negative_balances=money(negative)))
     summary = revenue_summary or revenue(db, params)["summary"]
-    return dict(channels=channels, pending=states["PENDING"], failed=states["FAILED"],
+    return dict(channels=channels, pending=states[PaymentStatus.PENDING.value], failed=states[PaymentStatus.FAILED.value],
                 unledgered_paid=dict(count=unledgered[0], amount=money(unledgered[1])), refunded=summary["refunds"],
                 wallets=wallets, commission_receivables=summary["outstanding_end"], commission_settlements=summary["collected_net"],
                 bank_settlement_amount=None, bank_settlement_note="Unavailable: no bank settlement records are stored. Wallet settlements and captured customer payments do not confirm bank receipt.")
@@ -251,7 +271,7 @@ def dashboard(db, admin, params, *, now=None):
 
 def restaurant_performance(db, params):
     order_stats = select(FoodOrder.restaurant_id, func.count().label("orders"),
-        func.sum(case((FoodOrder.status == "COMPLETED", 1), else_=0)).label("completed")).where(
+        func.sum(case((FoodOrder.status == OrderStatus.COMPLETED, 1), else_=0)).label("completed")).where(
             scope(FoodOrder.created_at, params)).group_by(FoodOrder.restaurant_id).subquery()
     reservations = select(Reservation.restaurant_id, func.count().label("reservations")).where(
         Reservation.reservation_date >= params.start_date, Reservation.reservation_date <= params.end_date).group_by(Reservation.restaurant_id).subquery()
@@ -299,7 +319,7 @@ def activity(db, admin, params):
         event(Restaurant.id, "RESTAURANT_REGISTERED", "Restaurant registered", Restaurant.name, Restaurant.created_at),
         event(User.id, "CUSTOMER_REGISTERED", "Customer registered", "Customer account", User.created_at).where(User.role == UserRole.CUSTOMER),
         event(Reservation.id, "RESERVATION_CREATED", "Reservation created", Restaurant.name, Reservation.created_at).join(Restaurant, Reservation.restaurant_id == Restaurant.id),
-        event(FoodOrder.id, "ORDER_COMPLETED", "Order completed", Restaurant.name, FoodOrder.completed_at).join(Restaurant, FoodOrder.restaurant_id == Restaurant.id).where(FoodOrder.status == "COMPLETED", FoodOrder.completed_at.is_not(None)),
+        event(FoodOrder.id, "ORDER_COMPLETED", "Order completed", Restaurant.name, FoodOrder.completed_at).join(Restaurant, FoodOrder.restaurant_id == Restaurant.id).where(FoodOrder.status == OrderStatus.COMPLETED, FoodOrder.completed_at.is_not(None)),
         event(PC.id, "PAYMENT_RECORDED", "Payment recorded", Restaurant.name, PC.occurred_at).join(Restaurant, PC.restaurant_id == Restaurant.id).where(PC.source_type.in_(PAYMENT_SOURCES)),
         event(Payout.id, "COMMISSION_SETTLED", "Commission settled to admin wallet", Restaurant.name, Payout.created_at).join(Restaurant, Payout.manager_id == Restaurant.manager_id),
         event(Notification.id, "APPROVAL_REQUEST", Notification.title, Restaurant.name, Notification.created_at).outerjoin(Restaurant, Notification.restaurant_id == Restaurant.id).where(

@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from enum import Enum
 
 from sqlalchemy import (
     JSON,
@@ -17,10 +18,46 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
+from app.models.payment_values import PaymentMethod, PaymentStatus
 
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class OrderStatus(str, Enum):
+    PLACED = "PLACED"
+    ACCEPTED = "ACCEPTED"
+    PREPARING = "PREPARING"
+    READY = "READY"
+    SERVED = "SERVED"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
+
+
+class OrderServiceType(str, Enum):
+    DINE_IN = "DINE_IN"
+    TAKEAWAY = "TAKEAWAY"
+
+
+class OrderSource(str, Enum):
+    PREORDER = "PREORDER"
+    RESERVATION = "RESERVATION"
+    SPOT = "SPOT"
+    WALK_IN = "WALK_IN"
+
+
+ACTIVE_ORDER_STATUSES = (
+    OrderStatus.PLACED,
+    OrderStatus.ACCEPTED,
+    OrderStatus.PREPARING,
+    OrderStatus.READY,
+)
+TERMINAL_ORDER_STATUSES = (
+    OrderStatus.CANCELLED,
+    OrderStatus.REJECTED,
+)
 
 
 class FoodOrder(Base):
@@ -53,7 +90,7 @@ class FoodOrder(Base):
     service_type: Mapped[str] = mapped_column(
         String(10),
         nullable=False,
-        default="DINE_IN",
+        default=OrderServiceType.DINE_IN.value,
         server_default="DINE_IN",
     )
     reservation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("reservations.id", ondelete="SET NULL"), nullable=True)
@@ -67,9 +104,9 @@ class FoodOrder(Base):
     tax_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, default=Decimal("0.00"))
     tax_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0.00"))
     total: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
-    status: Mapped[str] = mapped_column(String(24), nullable=False, default="PLACED")
-    payment_method: Mapped[str] = mapped_column(String(20), nullable=False, default="PAY_AT_DESK")
-    payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default=OrderStatus.PLACED.value)
+    payment_method: Mapped[str] = mapped_column(String(20), nullable=False, default=PaymentMethod.PAY_AT_DESK.value)
+    payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default=PaymentStatus.PENDING.value)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     customer_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

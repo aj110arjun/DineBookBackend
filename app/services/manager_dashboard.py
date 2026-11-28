@@ -11,19 +11,30 @@ from sqlalchemy.orm import Session
 
 from app.models.dining import DiningTable, RestaurantFloor
 from app.models.menu import Food, FoodVariant
-from app.models.orders import FoodOrder
-from app.models.reservation import Reservation, ReservationTable
+from app.models.orders import ACTIVE_ORDER_STATUSES, FoodOrder, OrderStatus
+from app.models.payment_values import PaymentSource, PaymentStatus
+from app.models.reservation import (
+    BLOCKING_RESERVATION_STATUSES,
+    PENDING_OR_CONFIRMED_RESERVATION_STATUSES,
+    Reservation,
+    ReservationStatus,
+    ReservationTable,
+)
 from app.models.revenue import PlatformCommission
-from app.models.reviews import Review
+from app.models.reviews import Review, ReviewStatus
 from app.schemas.manager_dashboard import DashboardQuery, DashboardResponse
 from app.services.commission import money
 from app.services.table_availability import RESTAURANT_TIMEZONE
 
-ORDER_STATUSES = ("PLACED", "ACCEPTED", "PREPARING", "READY", "SERVED", "COMPLETED", "CANCELLED", "REJECTED")
-RESERVATION_STATUSES = ("PENDING_PAYMENT", "CONFIRMED", "SEATED", "COMPLETED", "CANCELLED", "REJECTED", "NO_SHOW")
-CANCELLED = ("CANCELLED", "REJECTED")
-ELIGIBLE_VISITS = ("CONFIRMED", "SEATED", "COMPLETED")
-PAYMENT_SOURCES = ("FOOD_ORDER", "RESERVATION_FEE", "PREORDER")
+ORDER_STATUSES = tuple(status.value for status in OrderStatus)
+RESERVATION_STATUSES = tuple(status.value for status in ReservationStatus)
+CANCELLED = (OrderStatus.CANCELLED.value, OrderStatus.REJECTED.value)
+ELIGIBLE_VISITS = (
+    ReservationStatus.CONFIRMED.value,
+    ReservationStatus.SEATED.value,
+    ReservationStatus.COMPLETED.value,
+)
+PAYMENT_SOURCES = tuple(source.value for source in PaymentSource)
 
 
 def percent(numerator, denominator):
@@ -95,7 +106,11 @@ def _counts(db, model, restaurant_id, expression, start, end, previous_start, gr
         statuses[status] = statuses.get(status, 0) + count
         point = trend[day]
         point["total"] += count
-        category = ("completed" if status == "COMPLETED" else "cancelled" if status in (*CANCELLED, "NO_SHOW") else "pending")
+        category = (
+            "completed" if status == OrderStatus.COMPLETED
+            else "cancelled" if status in (*CANCELLED, ReservationStatus.NO_SHOW)
+            else "pending"
+        )
         point[category] += count
     return list(trend.values()), statuses, previous
 
@@ -138,7 +153,7 @@ def _customers(db, rid, start, end, previous_start, group, dates):
     order_activity = select(FoodOrder.customer_id.label("customer"),
                             _day(db, _local(db, FoodOrder.created_at)).label("day")).where(
         FoodOrder.restaurant_id == rid, FoodOrder.customer_id.is_not(None),
-        FoodOrder.status.notin_(CANCELLED), FoodOrder.payment_status != "REFUNDED")
+        FoodOrder.status.notin_(CANCELLED), FoodOrder.payment_status != PaymentStatus.REFUNDED)
     visit_activity = select(Reservation.user_id, cast(Reservation.reservation_date, String)).where(
         Reservation.restaurant_id == rid, Reservation.status.in_(ELIGIBLE_VISITS))
     activity = union_all(order_activity, visit_activity).subquery()
@@ -168,10 +183,11 @@ def _customers(db, rid, start, end, previous_start, group, dates):
 
 def _paid_orders(rid):
     reversed_payment = select(PlatformCommission.id).where(
-        PlatformCommission.restaurant_id == rid, PlatformCommission.source_type == "FOOD_ORDER",
+        PlatformCommission.restaurant_id == rid,
+        PlatformCommission.source_type == PaymentSource.FOOD_ORDER.value,
         PlatformCommission.source_id == FoodOrder.id, PlatformCommission.refunded_at.is_not(None),
     ).exists()
-    return (FoodOrder.restaurant_id == rid, FoodOrder.payment_status == "PAID",
+    return (FoodOrder.restaurant_id == rid, FoodOrder.payment_status == PaymentStatus.PAID,
             FoodOrder.status.notin_(CANCELLED), ~reversed_payment)
 
 
@@ -220,12 +236,12 @@ def _popular(db, rid, start, end, sort):
 def _payments(db, rid, start, end):
     pc = PlatformCommission
     low, high = utc_bounds(start, end)
-    method = func.coalesce(case((pc.source_type == "FOOD_ORDER", FoodOrder.payment_method),
-                               (pc.source_type == "RESERVATION_FEE", Reservation.payment_method),
-                               (pc.source_type == "PREORDER", Reservation.preorder_payment_method)), "UNKNOWN")
+    method = func.coalesce(case((pc.source_type == PaymentSource.FOOD_ORDER.value, FoodOrder.payment_method),
+                               (pc.source_type == PaymentSource.RESERVATION_FEE.value, Reservation.payment_method),
+                               (pc.source_type == PaymentSource.PREORDER.value, Reservation.preorder_payment_method)), "UNKNOWN")
     rows = db.query(method, func.count(pc.id), func.sum(pc.gross_amount)).select_from(pc).outerjoin(
-        FoodOrder, and_(pc.source_type == "FOOD_ORDER", pc.source_id == FoodOrder.id, FoodOrder.restaurant_id == rid)).outerjoin(
-        Reservation, and_(pc.source_type.in_(("RESERVATION_FEE", "PREORDER")), pc.source_id == Reservation.id,
+        FoodOrder, and_(pc.source_type == PaymentSource.FOOD_ORDER.value, pc.source_id == FoodOrder.id, FoodOrder.restaurant_id == rid)).outerjoin(
+        Reservation, and_(pc.source_type.in_((PaymentSource.RESERVATION_FEE.value, PaymentSource.PREORDER.value)), pc.source_id == Reservation.id,
                           Reservation.restaurant_id == rid)).filter(
         pc.restaurant_id == rid, pc.source_type.in_(PAYMENT_SOURCES), pc.occurred_at >= low, pc.occurred_at < high,
     ).group_by(method).order_by(func.sum(pc.gross_amount).desc(), method).all()
@@ -236,7 +252,7 @@ def _reviews(db, rid, start, end, previous_start):
     low, high = utc_bounds(previous_start, end)
     current = Review.created_at >= utc_bounds(start, end)[0]
     rows = db.query(current, Review.rating, func.count(Review.id)).filter(
-        Review.restaurant_id == rid, Review.status == "PUBLISHED", Review.created_at >= low, Review.created_at < high,
+        Review.restaurant_id == rid, Review.status == ReviewStatus.PUBLISHED, Review.created_at >= low, Review.created_at < high,
     ).group_by(current, Review.rating).all()
     ratings = {True: dict.fromkeys(range(1, 6), 0), False: dict.fromkeys(range(1, 6), 0)}
     for flag, rating, count in rows:
@@ -244,7 +260,7 @@ def _reviews(db, rid, start, end, previous_start):
     totals = {flag: sum(values.values()) for flag, values in ratings.items()}
     averages = {flag: money(sum(rating * count for rating, count in values.items()) / Decimal(totals[flag]))
                 if totals[flag] else Decimal(0) for flag, values in ratings.items()}
-    recent = db.query(Review).filter(Review.restaurant_id == rid, Review.status == "PUBLISHED",
+    recent = db.query(Review).filter(Review.restaurant_id == rid, Review.status == ReviewStatus.PUBLISHED,
         Review.created_at >= utc_bounds(start, end)[0], Review.created_at < high).order_by(Review.created_at.desc(), Review.id).limit(5).all()
     return metric(averages[True], averages[False]), {
         "total": totals[True], "average": averages[True],
@@ -267,14 +283,16 @@ def _live(db, rid, now):
     today, clock = local_now.date(), local_now.time().replace(tzinfo=None)
     low, high = utc_bounds(today, today)
     assignment = (ReservationTable.table_id == DiningTable.id, Reservation.restaurant_id == rid)
-    seated = select(ReservationTable.id).join(Reservation).where(*assignment, Reservation.status == "SEATED").exists()
+    seated = select(ReservationTable.id).join(Reservation).where(
+        *assignment, Reservation.status == ReservationStatus.SEATED
+    ).exists()
     overlap = or_(
         and_(Reservation.reservation_date == today, Reservation.start_time <= clock,
              or_(Reservation.end_time > clock, Reservation.end_time <= Reservation.start_time)),
         and_(Reservation.reservation_date == today - timedelta(days=1),
              Reservation.end_time <= Reservation.start_time, Reservation.end_time > clock))
     reserved = select(ReservationTable.id).join(Reservation).where(
-        *assignment, Reservation.status.in_(("PENDING_PAYMENT", "CONFIRMED")), overlap).exists()
+        *assignment, Reservation.status.in_(PENDING_OR_CONFIRMED_RESERVATION_STATUSES), overlap).exists()
     manual_today = and_(DiningTable.updated_at >= low, DiningTable.updated_at < high)
     status = case((DiningTable.status == "maintenance", "maintenance"), (seated, "occupied"),
                   (and_(DiningTable.status == "occupied", manual_today), "occupied"),
@@ -290,11 +308,11 @@ def _live(db, rid, now):
     total = sum(counts.values())
     preview = query.order_by(RestaurantFloor.floor_number, DiningTable.table_number, DiningTable.id).limit(20).all()
     upcoming = db.query(Reservation).filter(Reservation.restaurant_id == rid,
-        Reservation.status.in_(("CONFIRMED", "PENDING_PAYMENT")),
+        Reservation.status.in_(PENDING_OR_CONFIRMED_RESERVATION_STATUSES),
         or_(Reservation.reservation_date > today, and_(Reservation.reservation_date == today, Reservation.start_time >= clock)),
     ).order_by(Reservation.reservation_date, Reservation.start_time, Reservation.id).limit(5).all()
     active = db.query(FoodOrder).filter(FoodOrder.restaurant_id == rid,
-        FoodOrder.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY", "SERVED")),
+        FoodOrder.status.in_((*ACTIVE_ORDER_STATUSES, OrderStatus.SERVED)),
     ).order_by(FoodOrder.created_at.desc(), FoodOrder.id).limit(5).all()
     return {"as_of": now, "tables": {"total": total, **{key: counts.get(key, 0) for key in
             ("occupied", "available", "reserved", "maintenance")}, "occupancy_percent": percent(counts.get("occupied", 0), total)},
@@ -343,8 +361,10 @@ def dashboard(db: Session, restaurant, manager, params: DashboardQuery, *, now=N
         operations={"order_status": [{"status": status, "count": count} for status, count in order_counts.items()],
             "reservation_status": [{"status": status, "count": count} for status, count in visit_counts.items()],
             "order_trend": order_trend, "reservation_trend": visit_trend,
-            "order_completion_percent": percent(order_counts.get("COMPLETED", 0), orders),
-            "reservation_completion_percent": percent(visit_counts.get("COMPLETED", 0), visits),
+            "order_completion_percent": percent(order_counts.get(OrderStatus.COMPLETED.value, 0), orders),
+            "reservation_completion_percent": percent(
+                visit_counts.get(ReservationStatus.COMPLETED.value, 0), visits
+            ),
             "average_party_size": money(party_size), "expected_guests": guests or 0,
             "peak_order_hours": _peaks(db, FoodOrder, rid, start, end, order_hour),
             "peak_reservation_hours": _peaks(db, Reservation, rid, start, end, visit_hour), "peak_reservation_days": peak_days},

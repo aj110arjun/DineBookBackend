@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from enum import Enum
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, JSON, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
@@ -10,6 +11,18 @@ from app.db.database import Base
 
 def now_utc():
     return datetime.now(timezone.utc)
+
+
+class AITurnStatus(str, Enum):
+    RUNNING = "running"
+    COMPLETE = "complete"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class AIMessageSender(str, Enum):
+    USER = "user"
+    ASSISTANT = "assistant"
 
 
 class CustomerAIConversation(Base):
@@ -34,7 +47,7 @@ class CustomerAITurn(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("customer_ai_conversations.id", ondelete="CASCADE"), nullable=False, index=True)
     client_message_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    status: Mapped[str] = mapped_column(String(12), nullable=False, default="running")
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default=AITurnStatus.RUNNING.value)
     error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
     tool_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)

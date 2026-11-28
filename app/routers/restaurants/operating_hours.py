@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.restaurant_hours import RestaurantHours, RestaurantHoursException
-from app.models.reservation import Reservation
+from app.models.reservation import BLOCKING_RESERVATION_STATUSES, Reservation
 from app.models.user import User
 from app.routers.auth.admin_auth import current_admin
 from app.routers.auth.chef_auth import current_chef
@@ -174,7 +174,7 @@ def affected_reservations(db: Session, restaurant_id: uuid.UUID, schedule_by_day
                           exception_start: date | None = None, exception_end: date | None = None,
                           exception_periods: list[dict] | None = None) -> list[Reservation]:
     query = db.query(Reservation).filter(Reservation.restaurant_id == restaurant_id,
-        Reservation.status.in_(("PENDING_PAYMENT", "CONFIRMED", "SEATED")),
+        Reservation.status.in_(BLOCKING_RESERVATION_STATUSES),
         Reservation.reservation_date >= restaurant_today()).order_by(Reservation.reservation_date, Reservation.start_time)
     affected = []
     for reservation in query.all():
@@ -204,7 +204,7 @@ def affected_by_exception_update(db: Session, restaurant_id: uuid.UUID, old_star
     start = min(old_start, new_start)
     end = max(old_end, new_end)
     rows = db.query(Reservation).filter(Reservation.restaurant_id == restaurant_id,
-        Reservation.status.in_(("PENDING_PAYMENT", "CONFIRMED", "SEATED")),
+        Reservation.status.in_(BLOCKING_RESERVATION_STATUSES),
         Reservation.reservation_date >= max(start, restaurant_today()),
         Reservation.reservation_date <= end).order_by(Reservation.reservation_date, Reservation.start_time).all()
     affected = []

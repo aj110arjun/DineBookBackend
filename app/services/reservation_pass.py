@@ -7,6 +7,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import qrcode
 
+from app.models.reservation import ReservationFulfillmentType, ReservationStatus
 from app.services.reservation_invoice_pdf import _status
 
 
@@ -36,13 +37,13 @@ def build_reservation_pass_png(item, restaurant, customer, tables, reservation_c
     draw.rectangle((28, 112, 612, 140), fill="#4f101d")
     text("DINEBOOK", 58, 72, 17, "#d7b96c", True)
     text("RESERVATION PASS", 58, 104, 12, "#d7b96c", True)
-    text("CONFIRMED", 580, 78, 12, "#b4e5bf", True, "rs")
+    text(ReservationStatus.CONFIRMED.value, 580, 78, 12, "#b4e5bf", True, "rs")
     text(customer.name or "Guest", 320, 184, 23, bold=True, anchor="ms")
     text(restaurant.name, 320, 211, 16, "#776b65", anchor="ms")
     # Integer module scaling preserves sharp QR edges and its quiet zone.
     image.paste(qr_image, ((640 - qr_image.width) // 2, 267 + (210 - qr_image.height) // 2))
     draw.line((60, 535, 580, 535), fill="#eee5e1")
-    has_preorder = item.fulfillment_type == "PREORDER" and bool(item.preorder_items)
+    has_preorder = item.fulfillment_type == ReservationFulfillmentType.PREORDER and bool(item.preorder_items)
     rows = [
         ("Reservation code", reservation_code, True),
         ("Date and time", f"{item.reservation_date.strftime('%d %B %Y')} · {item.start_time.strftime('%I:%M %p').lstrip('0')}", False),

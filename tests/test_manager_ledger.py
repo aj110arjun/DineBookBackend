@@ -1,6 +1,7 @@
 import asyncio
 import csv
 import io
+import re
 import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -18,6 +19,7 @@ from app.db.database import get_db
 from app.models.restaurant import RestaurantStatus
 from app.models.user import UserRole
 from app.routers.manager.manager_ledger import router
+from app.services.manager_ledger_exports import pdf_text_width
 from tests.test_manager_dashboard import DashboardFixtures, NOW
 
 PREFIX = "/api/manager/ledger"
@@ -147,6 +149,24 @@ class ManagerLedgerTests(DashboardFixtures, unittest.TestCase):
         self.assertIn(f"ORD-{self.own.source_id.hex[:8].upper()}".encode(), response.content)
         self.assertNotIn(str(self.own.source_id).encode(), response.content)
         self.assertIn(b"Page 2 of 2", response.content)
+
+    def test_pdf_amount_headers_and_values_share_right_aligned_column_edges(self):
+        response = self.request("/export", query=PERIOD + "&format=pdf")
+        self.assertEqual(response.status_code, 200, response.text)
+        header = re.search(rb"1 0 0 1 ([\d.]+) 434 Tm \(Collected\) Tj ET", response.content)
+        amount = re.search(rb"1 0 0 1 ([\d.]+) 414 Tm \(1,000\.00\) Tj ET", response.content)
+        self.assertIsNotNone(header)
+        self.assertIsNotNone(amount)
+
+        collected_column_right_edge = 36 + 100 + 110 + 130 + 90 - 8
+        self.assertAlmostEqual(
+            float(header.group(1)) + pdf_text_width("Collected", 7),
+            collected_column_right_edge,
+        )
+        self.assertAlmostEqual(
+            float(amount.group(1)) + pdf_text_width("1,000.00", 7),
+            collected_column_right_edge,
+        )
 
     def test_no_business_writes_and_oversized_exports_never_silently_truncate(self):
         statements = []

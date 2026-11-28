@@ -8,10 +8,11 @@ from fastapi import HTTPException
 from sqlalchemy import or_
 
 from app.models.orders import FoodOrder
+from app.models.payment_values import PaymentStatus
 from app.models.reservation import Reservation
 from app.models.restaurant import Restaurant, RestaurantStatus
-from app.models.offers import FoodOrderOffer
-from app.models.wallet import WalletAccount, WalletTransaction, WalletTopUp
+from app.models.offers import FoodOrderOffer, OfferDiscountType
+from app.models.wallet import WalletAccount, WalletTransaction, WalletTopUp, WalletTransactionType
 from app.routers.restaurants.operating_hours import effective_periods, serialize_periods
 from app.routers.restaurants.reservations import suitable_table_groups, within_operating_hours, ReservationCreate
 from app.routers.commerce.orders import customer_offer_uses
@@ -133,17 +134,23 @@ class CustomerReadTools:
         if plan.resource_id:
             return self.payments(plan)
         rows = self.db.query(WalletTransaction).filter(WalletTransaction.user_id == self.customer_id,
-            WalletTransaction.transaction_type == "REFUND").order_by(WalletTransaction.created_at.desc()).limit(5).all()
+            WalletTransaction.transaction_type == WalletTransactionType.REFUND).order_by(WalletTransaction.created_at.desc()).limit(5).all()
         cards = [AICard(title="Recorded wallet refund", kind="refund", href="/customer/profile/transactions", fields={
             "Transaction ID": str(row.id), "Amount": money(row.amount), "Destination": "DineBook wallet", "Recorded": stamp(row.created_at),
         }) for row in rows]
         if not cards:
-            for row in self.db.query(FoodOrder).filter(FoodOrder.customer_id == self.customer_id, FoodOrder.payment_status == "REFUNDED").order_by(FoodOrder.updated_at.desc()).limit(5).all():
+            for row in self.db.query(FoodOrder).filter(
+                FoodOrder.customer_id == self.customer_id,
+                FoodOrder.payment_status == PaymentStatus.REFUNDED,
+            ).order_by(FoodOrder.updated_at.desc()).limit(5).all():
                 cards.append(AICard(title="Recorded order refund status", kind="refund", href="/customer/profile/orders", fields={
                     "Order ID": str(row.id), "Status": row.payment_status, "Order total": money(row.total), "Destination": "Check transaction details",
                 }))
             for row in (self.db.query(Reservation).filter(Reservation.user_id == self.customer_id,
-                or_(Reservation.payment_status == "REFUNDED", Reservation.preorder_payment_status == "REFUNDED"))
+                or_(
+                    Reservation.payment_status == PaymentStatus.REFUNDED,
+                    Reservation.preorder_payment_status == PaymentStatus.REFUNDED,
+                ))
                 .order_by(Reservation.updated_at.desc()).limit(5).all()):
                 cards.append(AICard(title="Recorded reservation refund status", kind="refund", href=f"/customer/profile/reservations/{row.id}", fields={
                     "Booking ID": str(row.id), "Fee payment": row.payment_status, "Reservation fee": money(row.fee_amount),
@@ -207,7 +214,7 @@ class CustomerReadTools:
         for offer in offers:
             used = customer_offer_uses(self.db, offer.id, self.customer_id)
             cards.append(AICard(title=offer.title, kind="offer", restaurant_id=str(row.id), href=f"/customer/restaurants/{row.id}", fields={
-                "Code": offer.code, "Discount": money(offer.discount_percent) if offer.discount_type == "FIXED" else f"{offer.discount_percent}%",
+                "Code": offer.code, "Discount": money(offer.discount_percent) if offer.discount_type == OfferDiscountType.FIXED else f"{offer.discount_percent}%",
                 "Minimum subtotal": money(offer.minimum_subtotal), "Applies to": offer.applicability,
                 "Your usage limit": "Reached" if offer.per_customer_limit is not None and used >= offer.per_customer_limit else "Check eligible items at checkout",
                 "Eligibility": "Checkout preview confirms the discount for your cart",

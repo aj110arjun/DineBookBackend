@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import decode_access_token
 from app.db.database import get_db
-from app.models.notifications import Notification, NotificationPreference
+from app.models.notifications import Notification, NotificationCategory, NotificationPreference, NotificationPriority
 from app.models.user import AccountStatus, User, UserRole
 from app.routers.auth.admin_auth import ACCESS_COOKIE, current_admin
 from app.routers.auth.chef_auth import current_chef
@@ -23,7 +23,7 @@ from app.services.admin_settings import (
 )
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
-CATEGORIES = {"RESERVATION", "ORDER", "PAYMENT", "REVIEW", "STAFF", "APPROVAL", "SYSTEM", "PROMOTION"}
+CATEGORIES = {category.value for category in NotificationCategory}
 
 
 def _user(token: str | None, db: Session) -> User:
@@ -77,7 +77,7 @@ def list_notifications(unread: bool | None = None, category: str | None = None,
         query = query.filter(Notification.category == category)
     if priority:
         priority = priority.upper()
-        if priority not in {"LOW", "NORMAL", "HIGH", "CRITICAL"}:
+        if priority not in {value.value for value in NotificationPriority}:
             raise HTTPException(400, "Unknown notification priority.")
         query = query.filter(Notification.priority == priority)
     total = query.count()

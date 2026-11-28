@@ -10,8 +10,13 @@ from sqlalchemy import and_, or_, text
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from app.models.orders import FoodOrder
-from app.models.reservation import Reservation
+from app.models.orders import ACTIVE_ORDER_STATUSES, FoodOrder, OrderStatus
+from app.models.payment_values import PaymentStatus
+from app.models.reservation import (
+    BLOCKING_RESERVATION_STATUSES,
+    Reservation,
+    ReservationStatus,
+)
 from app.models.wallet import WalletAccount, WalletTransaction
 from app.routers.auth.manager_auth import current_manager
 from app.routers.restaurants.dining import get_manager_restaurant
@@ -24,8 +29,8 @@ from app.services.ollama_service import ollama_service, OllamaServiceError
 from app.services.table_availability import RESTAURANT_TIMEZONE
 
 REFERENCE = re.compile(r"\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b", re.I)
-ACTIVE_ORDERS = ("PLACED", "ACCEPTED", "PREPARING", "READY", "SERVED")
-ACTIVE_VISITS = ("PENDING_PAYMENT", "CONFIRMED", "SEATED")
+ACTIVE_ORDERS = tuple(status.value for status in ACTIVE_ORDER_STATUSES) + (OrderStatus.SERVED.value,)
+ACTIVE_VISITS = tuple(status.value for status in BLOCKING_RESERVATION_STATUSES)
 HELP = {
     "reservations": ("Reservations", "/manager/reservations", "Open Reservations to review arrivals, check guests in, or manage a booking. The assistant only reads booking information."),
     "orders": ("Orders", "/manager/reservations", "Open a reservation to manage its orders. Use New walk-in order for a walk-in. Accepting, preparing, completing or cancelling orders uses the existing order controls."),
@@ -158,7 +163,10 @@ def read_answer(context, payload, plan, limited, *, now=None):
         elif plan.action in {"orders", "reservations", "payments"}:
             if plan.action == "payments":
                 response.reply = "Here are up to five pending order payments and five pending reservation fees. Open Payments for complete recorded payment details."
-                queries = [(FoodOrder, (FoodOrder.payment_status == "PENDING",)), (Reservation, (Reservation.payment_status == "PENDING",))]
+                queries = [
+                    (FoodOrder, (FoodOrder.payment_status == PaymentStatus.PENDING,)),
+                    (Reservation, (Reservation.payment_status == PaymentStatus.PENDING,)),
+                ]
                 if plan.period:
                     low, high = utc_bounds(start, end)
                     queries = [(FoodOrder, (*queries[0][1], FoodOrder.created_at >= low, FoodOrder.created_at < high)),
@@ -169,7 +177,17 @@ def read_answer(context, payload, plan, limited, *, now=None):
                 states = ACTIVE_ORDERS if model is FoodOrder else ACTIVE_VISITS
                 filters = []
                 if not resource_id and plan.state != "all":
-                    filters.append(model.status.in_(states if plan.state == "active" else ("COMPLETED",) if plan.state == "completed" else ("CANCELLED", "REJECTED", "NO_SHOW")))
+                    if plan.state == "active":
+                        selected_states = states
+                    elif plan.state == "completed":
+                        selected_states = (OrderStatus.COMPLETED,)
+                    else:
+                        selected_states = (
+                            OrderStatus.CANCELLED,
+                            OrderStatus.REJECTED,
+                            ReservationStatus.NO_SHOW,
+                        )
+                    filters.append(model.status.in_(selected_states))
                 if not resource_id and plan.period:
                     if model is Reservation:
                         filters += [model.reservation_date >= start, model.reservation_date <= end]

@@ -10,7 +10,7 @@ from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.restaurant_document import RestaurantDocument, RestaurantDocumentType
 from app.models.restaurant_hours import RestaurantHours
 from app.models.menu import Category, Food
-from app.models.reviews import Review
+from app.models.reviews import Review, ReviewStatus
 from app.services.menu_listing import menu_page
 
 
@@ -204,7 +204,7 @@ def list_customer_restaurants(
             for restaurant_id, average, count in db.query(
                 Review.restaurant_id, func.avg(Review.rating), func.count(Review.id)
             ).filter(
-                Review.restaurant_id.in_(restaurant_ids), Review.status == "PUBLISHED"
+                Review.restaurant_id.in_(restaurant_ids), Review.status == ReviewStatus.PUBLISHED
             ).group_by(Review.restaurant_id).all()
         }
     items = []

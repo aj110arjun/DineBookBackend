@@ -33,6 +33,7 @@ from app.core.security import (
     validate_new_password,
 )
 from app.db.database import get_db
+from app.models.notifications import NotificationCategory, NotificationPriority, NotificationType
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.restaurant_document import (
     RestaurantDocument,
@@ -661,10 +662,10 @@ async def register_manager(
 
         db.flush()
         for admin in db.query(User).filter(User.role == UserRole.ADMIN, User.is_active.is_(True)).all():
-            create_notification(db, admin, notification_type="restaurant.approval_requested", category="APPROVAL",
+            create_notification(db, admin, notification_type=NotificationType.RESTAURANT_APPROVAL_REQUESTED, category=NotificationCategory.APPROVAL,
                 title="Restaurant approval requested", message=f"{restaurant.name} submitted an onboarding application.",
                 restaurant_id=restaurant.id, entity_type="restaurant", entity_id=restaurant.id,
-                action_url="/admin/requests", priority="HIGH",
+                action_url="/admin/requests", priority=NotificationPriority.HIGH,
                 dedupe_key=f"restaurant:{restaurant.id}:approval-requested:{admin.id}")
         db.commit()
 

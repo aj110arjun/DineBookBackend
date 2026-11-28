@@ -1,4 +1,4 @@
-from app.models.notifications import NotificationPreference
+from app.models.notifications import NotificationCategory, NotificationPreference, NotificationType
 from app.schemas.admin_settings import AdminNotificationSettings
 from app.services.customer_settings import (
     notification_values,
@@ -9,17 +9,17 @@ from app.services.customer_settings import (
 ADMIN_NOTIFICATION_DEFAULTS = AdminNotificationSettings().model_dump()
 
 ADMIN_CATEGORY_FIELDS = {
-    "APPROVAL": ("approval_updates",),
-    "REVIEW": ("review_updates",),
-    "PAYMENT": ("wallet_transactions",),
-    "SYSTEM": ("system_updates",),
+    NotificationCategory.APPROVAL: ("approval_updates",),
+    NotificationCategory.REVIEW: ("review_updates",),
+    NotificationCategory.PAYMENT: ("wallet_transactions",),
+    NotificationCategory.SYSTEM: ("system_updates",),
 }
 
 ESSENTIAL_ADMIN_TYPES = {
-    "payment.failed",
-    "wallet.topup.failed",
-    "restaurant.suspended",
-    "system.incident",
+    NotificationType.PAYMENT_FAILED.value,
+    NotificationType.WALLET_TOPUP_FAILED.value,
+    NotificationType.RESTAURANT_SUSPENDED.value,
+    NotificationType.SYSTEM_INCIDENT.value,
 }
 
 

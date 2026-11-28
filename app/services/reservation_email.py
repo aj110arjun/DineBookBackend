@@ -11,7 +11,9 @@ from app.core.email import send_branded_email
 from app.services.customer_settings import customer_notification_allowed
 from app.db.database import SessionLocal
 from app.models.dining import DiningTable
-from app.models.reservation import Reservation, ReservationTable
+from app.models.notifications import NotificationCategory, NotificationChannel, NotificationType
+from app.models.payment_values import PaymentMethod, PaymentStatus
+from app.models.reservation import Reservation, ReservationFulfillmentType, ReservationStatus, ReservationTable
 from app.models.restaurant import Restaurant
 from app.models.user import User
 from app.services.reservation_invoice_pdf import build_reservation_invoice_pdf
@@ -31,21 +33,25 @@ def _money(value: Decimal | float | int | None) -> str:
 
 
 def _status(method: str | None, status: str | None, amount: Decimal | float | int | None) -> str:
-    method_name = {"WALLET": "DineBook wallet", "RAZORPAY": "Razorpay", "PAY_AT_DESK": "restaurant"}.get(method or "", "payment method")
-    if status == "PAID":
+    method_name = {
+        PaymentMethod.WALLET: "DineBook wallet",
+        PaymentMethod.RAZORPAY: "Razorpay",
+        PaymentMethod.PAY_AT_DESK: "restaurant",
+    }.get(method or "", "payment method")
+    if status == PaymentStatus.PAID:
         return f"Paid via {method_name}"
-    if method == "PAY_AT_DESK":
+    if method == PaymentMethod.PAY_AT_DESK:
         return f"Pay at restaurant · {_money(amount)} due"
-    return f"{(status or 'PENDING').replace('_', ' ').title()} · {_money(amount)} due"
+    return f"{(status or PaymentStatus.PENDING.value).replace('_', ' ').title()} · {_money(amount)} due"
 
 
 def _invoice_totals(item: Reservation) -> tuple[bool, Decimal, Decimal, Decimal, Decimal, Decimal, list[tuple[str, str]]]:
-    has_preorder = item.fulfillment_type == "PREORDER" and bool(item.preorder_items)
+    has_preorder = item.fulfillment_type == ReservationFulfillmentType.PREORDER and bool(item.preorder_items)
     preorder_amount = Decimal(item.preorder_total or 0)
     preorder_discount = Decimal(item.preorder_discount or 0)
     preorder_tax = Decimal(item.preorder_tax_amount or 0)
     preorder_subtotal = preorder_amount - preorder_tax + preorder_discount
-    preorder_paid = has_preorder and item.preorder_payment_status == "PAID"
+    preorder_paid = has_preorder and item.preorder_payment_status == PaymentStatus.PAID
     due = Decimal("0") if preorder_paid or not has_preorder else preorder_amount
     paid = Decimal(item.fee_amount or 0) + (preorder_amount if preorder_paid else Decimal("0"))
     rows = [
@@ -71,7 +77,8 @@ def send_reservation_confirmation(db: Session, reservation_id: uuid.UUID) -> boo
     """Send a branded confirmation once, after the mandatory reservation fee is paid."""
 
     item = db.query(Reservation).filter(Reservation.id == reservation_id).with_for_update().first()
-    if item is None or item.status != "CONFIRMED" or item.payment_status != "PAID" or item.confirmation_email_sent_at:
+    if (item is None or item.status != ReservationStatus.CONFIRMED
+            or item.payment_status != PaymentStatus.PAID or item.confirmation_email_sent_at):
         return False
 
     customer = db.query(User).filter(User.id == item.user_id).first()
@@ -81,7 +88,13 @@ def send_reservation_confirmation(db: Session, reservation_id: uuid.UUID) -> boo
         logger.warning("Cannot send reservation confirmation email; customer or restaurant is missing for %s", reservation_id)
         return False
 
-    if not customer_notification_allowed(db, customer, notification_type="reservation.confirmed", category="RESERVATION", channel="email"):
+    if not customer_notification_allowed(
+        db,
+        customer,
+        notification_type=NotificationType.RESERVATION_CONFIRMED,
+        category=NotificationCategory.RESERVATION,
+        channel=NotificationChannel.EMAIL.value,
+    ):
         return False
 
     assignments = db.query(ReservationTable).filter(ReservationTable.reservation_id == item.id).all()

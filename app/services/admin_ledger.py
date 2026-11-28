@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlalchemy import case, func, literal, select, union_all
 
+from app.models.payment_values import LedgerEntryType
 from app.models.restaurant import Restaurant
 from app.models.revenue import PlatformCommission as PC, PlatformCommissionPayout as Payout
 from app.schemas.admin_ledger import AdminLedgerReport
@@ -21,15 +22,15 @@ def financial_entries():
                 source.label("source_type"), reference.label("reference"),
                 *[(amounts[key] if key in amounts else literal(0)).label(key) for key in AMOUNTS]]
 
-    captures = select(*event(PC.id, PC.occurred_at, "COLLECTION", PC.source_type, PC.source_id,
+    captures = select(*event(PC.id, PC.occurred_at, LedgerEntryType.COLLECTION.value, PC.source_type, PC.source_id,
         gross=PC.gross_amount, generated=PC.commission_amount)).join(
         Restaurant, Restaurant.id == PC.restaurant_id).where(PC.source_type.in_(PAYMENT_SOURCES))
-    refunds = select(*event(PC.id, PC.refunded_at, "REFUND", PC.source_type, PC.source_id,
+    refunds = select(*event(PC.id, PC.refunded_at, LedgerEntryType.REFUND.value, PC.source_type, PC.source_id,
         refunds=PC.gross_amount, reversed=PC.commission_amount,
         collection_reversals=case((PC.payout_id.is_not(None), PC.commission_amount), else_=0))).join(
         Restaurant, Restaurant.id == PC.restaurant_id).where(PC.source_type.in_(PAYMENT_SOURCES), PC.refunded_at.is_not(None))
     # A historical payout can cover many payment records. Read each payout once.
-    settlements = select(*event(Payout.id, Payout.created_at, "SETTLEMENT", literal("COMMISSION_SETTLEMENT"),
+    settlements = select(*event(Payout.id, Payout.created_at, LedgerEntryType.SETTLEMENT.value, literal("COMMISSION_SETTLEMENT"),
         Payout.id, collected=Payout.amount)).outerjoin(Restaurant, Restaurant.manager_id == Payout.manager_id)
     raw = union_all(captures, refunds, settlements).subquery()
     earned = raw.c.generated - raw.c.reversed

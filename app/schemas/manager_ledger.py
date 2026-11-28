@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.models.payment_values import LedgerEntryType
 from app.services.table_availability import RESTAURANT_TIMEZONE
 
 
@@ -35,7 +36,7 @@ class LedgerExportQuery(LedgerQuery):
 class LedgerEntry(BaseModel):
     id: str
     occurred_at: datetime
-    kind: Literal["COLLECTION", "REFUND"]
+    kind: LedgerEntryType
     source_type: str
     reference: str
     collected: Decimal

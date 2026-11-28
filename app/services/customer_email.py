@@ -4,11 +4,18 @@ Authentication email deliberately continues through core.email directly.
 """
 
 from app.core.email import send_branded_email
+from app.models.notifications import NotificationChannel
 from app.services.customer_settings import customer_notification_allowed
 
 
 def send_customer_notification_email(db, recipient, *, notification_type, category, **message) -> bool:
-    if not customer_notification_allowed(db, recipient, notification_type=notification_type, category=category, channel="email"):
+    if not customer_notification_allowed(
+        db,
+        recipient,
+        notification_type=notification_type,
+        category=category,
+        channel=NotificationChannel.EMAIL.value,
+    ):
         return False
     send_branded_email(to=recipient.email, **message)
     return True

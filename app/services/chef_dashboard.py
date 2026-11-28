@@ -4,16 +4,17 @@ from datetime import datetime, time, timedelta, timezone
 from sqlalchemy import case, func, or_
 
 from app.models.dining import DiningTable, RestaurantFloor
-from app.models.orders import FoodOrder
+from app.models.orders import ACTIVE_ORDER_STATUSES, FoodOrder, OrderStatus
+from app.models.reservation import ReservationFulfillmentType
 from app.models.realtime import RealtimeEvent
-from app.models.reservation import Reservation, ReservationTable
+from app.models.reservation import Reservation, ReservationStatus, ReservationTable
 from app.routers.commerce.orders import CHEF_TRANSITIONS
-from app.schemas.chef_dashboard import ChefDashboardResponse
+from app.schemas.chef_dashboard import ChefDashboardResponse, KitchenOrderFilter
 from app.services.table_availability import RESTAURANT_TIMEZONE
 
-ACTIVE = ("PLACED", "ACCEPTED", "PREPARING", "READY")
-PREPARED = ("READY", "SERVED", "COMPLETED")
-STATUSES = (*ACTIVE, "SERVED", "COMPLETED", "CANCELLED", "REJECTED")
+ACTIVE = tuple(status.value for status in ACTIVE_ORDER_STATUSES)
+PREPARED = (OrderStatus.READY.value, OrderStatus.SERVED.value, OrderStatus.COMPLETED.value)
+STATUSES = tuple(status.value for status in OrderStatus)
 
 
 def aware(value):
@@ -80,7 +81,11 @@ def dashboard(db, restaurant, params, *, now=None):
     live_counts = dict(scope.with_entities(FoodOrder.status, func.count()).filter(
         FoodOrder.status.in_(ACTIVE)).group_by(FoodOrder.status).all())
     completed_at = func.coalesce(FoodOrder.completed_at, FoodOrder.created_at)
-    completed = scope.filter(FoodOrder.status == "COMPLETED", completed_at >= day_start, completed_at < day_end).count()
+    completed = scope.filter(
+        FoodOrder.status == OrderStatus.COMPLETED,
+        completed_at >= day_start,
+        completed_at < day_end,
+    ).count()
 
     order_bucket = bucket(db, FoodOrder.created_at, hourly)
     aggregates = scope.with_entities(order_bucket, FoodOrder.status, func.count()).filter(
@@ -123,9 +128,9 @@ def dashboard(db, restaurant, params, *, now=None):
     ranked = active_scope.with_entities(FoodOrder.id.label("order_id"), func.row_number().over(
         order_by=(FoodOrder.created_at, FoodOrder.id)).label("age_rank")).subquery()
     filtered = scope.join(ranked, ranked.c.order_id == FoodOrder.id)
-    if params.status != "ACTIVE":
+    if params.status != KitchenOrderFilter.ACTIVE:
         filtered = filtered.filter(FoodOrder.status == params.status)
-    total = sum(live_counts.values()) if params.status == "ACTIVE" else live_counts.get(params.status, 0)
+    total = sum(live_counts.values()) if params.status == KitchenOrderFilter.ACTIVE else live_counts.get(params.status, 0)
     page = min(params.page, max(1, (total + params.page_size - 1) // params.page_size))
     order_rows = filtered.add_columns(ranked.c.age_rank).order_by(FoodOrder.created_at, FoodOrder.id).offset(
         (page - 1) * params.page_size).limit(params.page_size).all()
@@ -133,7 +138,7 @@ def dashboard(db, restaurant, params, *, now=None):
 
     local_now = now.astimezone(RESTAURANT_TIMEZONE)
     visits = db.query(Reservation).filter(
-        Reservation.restaurant_id == rid, Reservation.status == "CONFIRMED",
+        Reservation.restaurant_id == rid, Reservation.status == ReservationStatus.CONFIRMED,
         or_(Reservation.reservation_date > today,
             (Reservation.reservation_date == today) & (Reservation.start_time >= local_now.time().replace(tzinfo=None))),
     ).order_by(Reservation.reservation_date, Reservation.start_time, Reservation.id).limit(8).all()
@@ -153,9 +158,16 @@ def dashboard(db, restaurant, params, *, now=None):
     events = db.query(RealtimeEvent).filter(RealtimeEvent.restaurant_id == rid,
         RealtimeEvent.event_type == "order.status_changed", RealtimeEvent.created_at <= now,
     ).order_by(RealtimeEvent.created_at.desc(), RealtimeEvent.id.desc()).limit(12).all()
-    descriptions = {"PLACED": "New order received", "ACCEPTED": "Order accepted",
-                    "PREPARING": "Preparation started", "READY": "Order marked ready", "SERVED": "Order served",
-                    "COMPLETED": "Order completed", "CANCELLED": "Order cancelled", "REJECTED": "Order rejected"}
+    descriptions = {
+        OrderStatus.PLACED: "New order received",
+        OrderStatus.ACCEPTED: "Order accepted",
+        OrderStatus.PREPARING: "Preparation started",
+        OrderStatus.READY: "Order marked ready",
+        OrderStatus.SERVED: "Order served",
+        OrderStatus.COMPLETED: "Order completed",
+        OrderStatus.CANCELLED: "Order cancelled",
+        OrderStatus.REJECTED: "Order rejected",
+    }
     activity = []
     for event in events:
         data = event.data or {}
@@ -163,7 +175,7 @@ def dashboard(db, restaurant, params, *, now=None):
         # Payment updates also use this event type; they must not invent status changes.
         if status not in descriptions or data.get("previous_status") == status:
             continue
-        if "previous_status" not in data and status not in {"PLACED", "ACCEPTED"}:
+        if "previous_status" not in data and status not in {OrderStatus.PLACED, OrderStatus.ACCEPTED}:
             continue
         activity.append({"id": str(event.event_id), "order_id": event.resource_id, "status": status,
             "description": descriptions[status] if "previous_status" in data else f"Order status recorded: {status.lower()}",
@@ -174,8 +186,9 @@ def dashboard(db, restaurant, params, *, now=None):
         group_by="hour" if hourly else "day",
         summary={"today_orders": today_orders, "yesterday_orders": yesterday_orders,
             "orders_change_percent": round((today_orders - yesterday_orders) / yesterday_orders * 100, 2) if yesterday_orders else None,
-            "pending_orders": live_counts.get("PLACED", 0) + live_counts.get("ACCEPTED", 0),
-            "preparing_orders": live_counts.get("PREPARING", 0), "ready_orders": live_counts.get("READY", 0),
+            "pending_orders": live_counts.get(OrderStatus.PLACED, 0) + live_counts.get(OrderStatus.ACCEPTED, 0),
+            "preparing_orders": live_counts.get(OrderStatus.PREPARING, 0),
+            "ready_orders": live_counts.get(OrderStatus.READY, 0),
             "completed_orders": completed, "average_preparation_minutes": average_today},
         order_volume=[{"date": key, "total": value} for key, value in volume.items()],
         status_distribution=[{"status": key, "count": value} for key, value in statuses.items()],
@@ -183,7 +196,8 @@ def dashboard(db, restaurant, params, *, now=None):
         active_orders={"items": active, "total": total, "page": page, "page_size": params.page_size},
         upcoming_reservations=[{"id": str(row.id), "arrival_at": datetime.combine(row.reservation_date, row.start_time, RESTAURANT_TIMEZONE),
             "number_of_guests": row.number_of_guests, "status": row.status, "tables": by_visit.get(row.id, []),
-            "preorder_items": kitchen_items(row.preorder_items) if row.fulfillment_type == "PREORDER" else []} for row in visits],
+            "preorder_items": kitchen_items(row.preorder_items)
+            if row.fulfillment_type == ReservationFulfillmentType.PREORDER else []} for row in visits],
         performance={"prepared_today": prepared_today, "measured_today": measured_today,
             "average_preparation_minutes": average_today,
             "longest_active_seconds": max(0, int((now - aware(oldest)).total_seconds())) if oldest else None,
