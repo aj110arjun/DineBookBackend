@@ -10,7 +10,12 @@ from app.models.orders import FoodOrder
 from app.models.reservation import Reservation
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.user import User, UserRole
-from app.routers.restaurants.reservations import manager_calendar_summary
+from app.routers.restaurants.reservations import (
+    ManagerReservationStatus,
+    manager_calendar_activities,
+    manager_calendar_summary,
+    manager_update_reservation_status,
+)
 
 
 class ManagerCalendarTests(unittest.TestCase):
@@ -18,7 +23,8 @@ class ManagerCalendarTests(unittest.TestCase):
         self.engine = create_engine("sqlite://")
         Base.metadata.create_all(self.engine)
         self.db = Session(self.engine)
-        self.customer = User(name="Customer", email="calendar@example.test", password_hash="x", role=UserRole.CUSTOMER)
+        self.customer = User(name="Customer", email="calendar@example.test", password_hash="x", role=UserRole.CUSTOMER,
+                             avatar_url="https://images.example.test/customer-avatar.jpg")
         self.db.add(self.customer)
         self.restaurants = []
         for index in range(2):
@@ -30,6 +36,7 @@ class ManagerCalendarTests(unittest.TestCase):
             self.db.flush()
             self.restaurants.append(restaurant)
         self.restaurant = self.restaurants[0]
+        self.reservations = []
         for status in ("CONFIRMED", "SEATED", "PENDING_PAYMENT", "CANCELLED", "COMPLETED"):
             reservation = Reservation(
                 user_id=self.customer.id, restaurant_id=self.restaurant.id,
@@ -38,6 +45,7 @@ class ManagerCalendarTests(unittest.TestCase):
             )
             self.db.add(reservation)
             self.db.flush()
+            self.reservations.append(reservation)
             self.db.add(FoodOrder(
                 customer_id=self.customer.id, restaurant_id=self.restaurant.id,
                 reservation_id=reservation.id, items=[], subtotal=10, total=10,
@@ -81,4 +89,105 @@ class ManagerCalendarTests(unittest.TestCase):
                 "guest_count": 0, "tones": ["pending"],
             },
         })
+
+    def test_manager_calendar_finds_visible_reservation_code_with_iso_lookup_date(self):
+        manager = self.db.get(User, self.restaurant.manager_id)
+        reservation = self.reservations[0]
+
+        result = manager_calendar_activities(
+            day=date(2030, 1, 1),
+            page=1,
+            order_page=1,
+            page_size=10,
+            search=f"RES-{reservation.id.hex[:8].upper()}",
+            status_filter=None,
+            table_id=None,
+            guest_filter=None,
+            sort="time",
+            manager=manager,
+            db=self.db,
+        )
+
+        self.assertTrue(result["reservation_id_lookup"])
+        self.assertEqual(result["reservation_lookup_date"], "2030-01-02")
+        self.assertEqual(result["reservations"]["items"][0]["reservation_code"], f"RES-{reservation.id.hex[:8].upper()}")
+        self.assertEqual(result["reservations"]["items"][0]["reservation_date_iso"], "2030-01-02")
+        self.assertEqual(result["reservations"]["items"][0]["customer_avatar_url"], self.customer.avatar_url)
+
+    def test_manager_calendar_finds_reservation_by_its_order_code(self):
+        manager = self.db.get(User, self.restaurant.manager_id)
+        reservation = self.reservations[0]
+        order = self.db.query(FoodOrder).filter(FoodOrder.reservation_id == reservation.id).first()
+
+        result = manager_calendar_activities(
+            day=date(2030, 1, 1),
+            page=1,
+            order_page=1,
+            page_size=10,
+            search=f"ORD-{order.id.hex[:8].upper()}",
+            status_filter=None,
+            table_id=None,
+            guest_filter=None,
+            sort="time",
+            manager=manager,
+            db=self.db,
+        )
+
+        self.assertEqual(result["reservations"]["total"], 1)
+        self.assertEqual(result["reservations"]["items"][0]["id"], str(reservation.id))
+        self.assertEqual(result["reservation_lookup_date"], "2030-01-02")
+        self.assertEqual(result["orders"]["total"], 0)
+
+    def test_manager_calendar_finds_spot_order_by_visible_code_across_dates(self):
+        order = FoodOrder(
+            customer_id=self.customer.id,
+            restaurant_id=self.restaurant.id,
+            reservation_id=None,
+            items=[],
+            subtotal=10,
+            total=10,
+            status="PLACED",
+            created_at=datetime(2030, 1, 2, 20, tzinfo=timezone.utc),
+        )
+        self.db.add(order)
+        self.db.commit()
+        manager = self.db.get(User, self.restaurant.manager_id)
+
+        result = manager_calendar_activities(
+            day=date(2030, 1, 1),
+            page=1,
+            order_page=1,
+            page_size=10,
+            search=f"#{order.id.hex[:8].upper()}",
+            status_filter=None,
+            table_id=None,
+            guest_filter=None,
+            sort="time",
+            manager=manager,
+            db=self.db,
+        )
+
+        self.assertEqual(result["orders"]["total"], 1)
+        self.assertEqual(result["orders"]["items"][0]["id"], str(order.id))
+        self.assertEqual(result["order_lookup_date"], "2030-01-03")
+
+    def test_marking_a_reservation_no_show_records_the_cooldown_start(self):
+        manager = self.db.get(User, self.restaurant.manager_id)
+        reservation = self.reservations[0]
+        before = datetime.now(timezone.utc)
+
+        result = manager_update_reservation_status(
+            reservation.id,
+            ManagerReservationStatus(status="NO_SHOW"),
+            manager,
+            self.db,
+        )
+
+        self.db.refresh(reservation)
+        recorded_at = reservation.no_show_at
+        if recorded_at.tzinfo is None:
+            recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+        self.assertEqual(result["status"], "NO_SHOW")
+        self.assertGreaterEqual(recorded_at, before)
+        self.assertLessEqual(recorded_at, datetime.now(timezone.utc))
 

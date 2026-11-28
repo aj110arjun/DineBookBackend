@@ -7,7 +7,7 @@ from app.models.restaurant_document import (
 from app.models.restaurant_hours import RestaurantHours, RestaurantHoursException
 from app.models.menu import Category, Food, FoodImage, FoodVariant
 from app.models.user import AccountStatus, EmailVerificationCode, User, UserRole
-from app.models.dining import DiningTable, Floor, RestaurantFloor
+from app.models.dining import DiningTable, Floor, FloorZone, RestaurantFloor
 from app.models.reservation import Reservation, ReservationTable
 from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction, WalletTransfer
 from app.models.orders import FoodOrder
@@ -23,8 +23,15 @@ from app.models.notifications import Notification, NotificationPreference
 from app.models.revenue import PlatformCommission, PlatformCommissionPayout, PlatformRevenueSettings
 from app.models.restaurant_staff import RestaurantStaff
 from app.models.rate_limit import RateLimitBucket
+from app.models.customer_settings import CustomerSettings
+from app.models.customer_ai import CustomerAIConversation, CustomerAITurn, CustomerAIMessage, CustomerAIKnowledge
 
 __all__ = [
+    "CustomerAIConversation",
+    "CustomerAITurn",
+    "CustomerAIMessage",
+    "CustomerAIKnowledge",
+    "CustomerSettings",
     "AccountStatus",
     "EmailVerificationCode",
     "Restaurant",
@@ -41,6 +48,7 @@ __all__ = [
     "FoodVariant",
     "Floor",
     "RestaurantFloor",
+    "FloorZone",
     "DiningTable",
     "Reservation",
     "ReservationTable",

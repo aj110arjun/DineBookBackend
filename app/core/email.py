@@ -1,6 +1,6 @@
+import smtplib
 from email.message import EmailMessage
 from html import escape
-import smtplib
 
 from fastapi import HTTPException
 

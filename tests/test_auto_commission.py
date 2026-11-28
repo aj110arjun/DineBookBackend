@@ -213,55 +213,58 @@ class AutomaticCommissionTests(unittest.TestCase):
         self.assertEqual(self.balance(self.manager), 0)
         self.assertEqual(self.balance(self.admin), 0)
 
-    def test_desk_order_transfers_only_commission(self):
+    def test_desk_order_records_outstanding_without_wallet_movements(self):
         self.fund_manager("200.00")
         row = self.order()
         manager_mark_order_paid(row.id, self.manager, self.db)
         manager_mark_order_paid(row.id, self.manager, self.db)
-        self.assertEqual(self.balance(self.manager), 100)
-        self.assertEqual(self.balance(self.admin), 100)
+        self.assertEqual(self.balance(self.manager), 200)
+        self.assertEqual(self.balance(self.admin), 0)
         self.assertEqual(row.payment_status, "PAID")
-        self.assertEqual(self.db.query(WalletTransaction).count(), 2)
+        self.assertEqual(self.db.query(WalletTransaction).count(), 0)
+        record = self.db.query(PlatformCommission).one()
+        self.assertEqual(record.commission_amount, 100)
+        self.assertIsNone(record.payout_id)
 
-    def test_insufficient_desk_funds_leave_payment_pending_after_rollback(self):
+    def test_desk_confirmation_needs_no_digital_funds(self):
         row = self.order()
-        with self.assertRaises(HTTPException) as caught:
-            manager_mark_order_paid(row.id, self.manager, self.db)
-        self.assertEqual(caught.exception.status_code, 409)
-        self.db.rollback()
-        self.assertEqual(row.payment_status, "PENDING")
-        self.assertEqual(self.db.query(PlatformCommission).count(), 0)
+        manager_mark_order_paid(row.id, self.manager, self.db)
+        self.assertEqual(row.payment_status, "PAID")
+        self.assertEqual(self.db.query(PlatformCommission).count(), 1)
         self.assertEqual(self.db.query(PlatformCommissionPayout).count(), 0)
         self.assertEqual(self.balance(self.admin), 0)
+        self.assertEqual(self.balance(self.manager), 0)
 
-    def test_generated_preorder_order_does_not_charge_commission_twice(self):
+    def test_generated_preorder_order_does_not_duplicate_receivable(self):
         self.fund_manager("200.00")
         reservation = self.reservation(fee="0.00", preorder="1000.00", method="PAY_AT_DESK")
         self.pay(reservation, "preorder", credit_gross=False)
         self.db.commit()
         order = self.order(reservation=reservation, preorder=True)
         manager_mark_order_paid(order.id, self.manager, self.db)
-        self.assertEqual(self.balance(self.manager), 100)
-        self.assertEqual(self.balance(self.admin), 100)
+        self.assertEqual(self.balance(self.manager), 200)
+        self.assertEqual(self.balance(self.admin), 0)
         self.assertEqual(self.db.query(PlatformCommission).one().source_type, "PREORDER")
 
-    def test_desk_reservation_settles_fee_and_preorder(self):
+    def test_desk_reservation_records_fee_and_preorder_receivables(self):
         self.fund_manager("200.00")
         row = self.reservation(preorder="1000.00", method="PAY_AT_DESK", paid=False)
         with patch("app.routers.restaurants.reservations.send_reservation_confirmation"):
             manager_confirm_payment(row.id, self.manager, self.db)
-        self.assertEqual(self.balance(self.manager), 90)
-        self.assertEqual(self.balance(self.admin), 110)
-        self.assertEqual(self.db.query(PlatformCommissionPayout).count(), 2)
+        self.assertEqual(self.balance(self.manager), 200)
+        self.assertEqual(self.balance(self.admin), 0)
+        self.assertEqual(self.db.query(PlatformCommissionPayout).count(), 0)
+        self.assertEqual(self.db.query(PlatformCommission).count(), 2)
 
-    def test_later_desk_preorder_confirmation_settles_its_share(self):
+    def test_later_desk_preorder_confirmation_records_its_receivable(self):
         self.fund_manager("200.00")
         row = self.reservation(preorder="1000.00", method="PAY_AT_DESK")
         row.preorder_payment_status = "PENDING"
         self.db.commit()
         manager_confirm_preorder_payment(row.id, self.manager, self.db)
-        self.assertEqual(self.balance(self.manager), 100)
-        self.assertEqual(self.balance(self.admin), 100)
+        self.assertEqual(self.balance(self.manager), 200)
+        self.assertEqual(self.balance(self.admin), 0)
+        self.assertIsNone(self.db.query(PlatformCommission).one().payout_id)
 
     def test_missing_admin_rolls_back_gross_credit_and_commission(self):
         row = self.reservation(fee="1000.00")
@@ -316,9 +319,9 @@ class AutomaticCommissionTests(unittest.TestCase):
         manager_revenue(self.manager, self.db)
         self.assertEqual(self.db.query(PlatformCommission).count(), 0)
         self.assertEqual(self.db.query(PlatformCommissionPayout).count(), 0)
-        with self.assertRaises(HTTPException) as caught:
-            pay_admin_commission(self.manager)
-        self.assertEqual(caught.exception.status_code, 410)
+        result = pay_admin_commission(self.manager, self.db)
+        self.assertEqual(result["settled_count"], 0)
+        self.assertEqual(self.db.query(PlatformCommissionPayout).count(), 0)
 
     def test_legacy_preview_is_read_only_and_apply_never_recredits_gross(self):
         self.reservation(fee="1000")

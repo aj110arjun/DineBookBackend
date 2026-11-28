@@ -3,7 +3,7 @@ import enum
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Enum, ForeignKey, ForeignKeyConstraint, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Enum, ForeignKey, ForeignKeyConstraint, Index, Integer, Numeric, String, Text, UniqueConstraint, column, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship, synonym
 
@@ -33,10 +33,24 @@ class RestaurantFloor(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     tables: Mapped[list["DiningTable"]] = relationship(back_populates="floor", cascade="all, delete-orphan")
+    zones: Mapped[list["FloorZone"]] = relationship(back_populates="floor", cascade="all, delete-orphan", order_by="FloorZone.name")
 
 
 # Keep the short name used by existing router imports.
 Floor = RestaurantFloor
+
+
+class FloorZone(Base):
+    __tablename__ = "floor_zones"
+    __table_args__ = (
+        UniqueConstraint("id", "floor_id", name="uq_floor_zones_id_floor"),
+        Index("uq_floor_zones_name", "floor_id", func.lower(column("name")), unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    floor_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("restaurant_floors.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    floor: Mapped[RestaurantFloor] = relationship(back_populates="zones")
 
 
 class DiningTable(Base):
@@ -46,11 +60,13 @@ class DiningTable(Base):
         UniqueConstraint("floor_id", "table_number", name="uq_dining_tables_floor_number"),
         UniqueConstraint("floor_id", "grid_row", "grid_col", name="uq_dining_tables_grid_position"),
         ForeignKeyConstraint(["floor_id", "restaurant_id"], ["restaurant_floors.id", "restaurant_floors.restaurant_id"], ondelete="RESTRICT", name="fk_dining_tables_floor_restaurant"),
+        ForeignKeyConstraint(["zone_id", "floor_id"], ["floor_zones.id", "floor_zones.floor_id"], ondelete="RESTRICT", name="fk_dining_tables_zone_floor"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     restaurant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("restaurants.id", ondelete="CASCADE"), nullable=False)
     floor_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    zone_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     table_number: Mapped[str] = mapped_column(String(30), nullable=False)
     capacity: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     reservation_fee: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=250)
@@ -73,5 +89,6 @@ class DiningTable(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     floor: Mapped[RestaurantFloor] = relationship(back_populates="tables")
+    zone: Mapped[FloorZone | None] = relationship(viewonly=True, foreign_keys=[zone_id, floor_id])
     grid_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
     grid_col: Mapped[int | None] = mapped_column(Integer, nullable=True)

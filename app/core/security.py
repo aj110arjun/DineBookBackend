@@ -84,8 +84,8 @@ def session_is_current(payload: dict, user) -> bool:
 
 
 def validate_new_password(value: str) -> str:
-    if not 10 <= len(value) <= 128:
-        raise ValueError("Password must contain between 10 and 128 characters.")
+    if not 8 <= len(value) <= 128:
+        raise ValueError("Password must contain between 8 and 128 characters.")
     if not any(char.isalpha() for char in value) or not any(not char.isalpha() and not char.isspace() for char in value):
         raise ValueError("Password must include a letter and a number or symbol.")
     return value

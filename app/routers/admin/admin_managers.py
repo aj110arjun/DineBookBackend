@@ -10,6 +10,7 @@ from sqlalchemy import String, cast, or_
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
+from app.models.notifications import NotificationCategory, NotificationPriority, NotificationType
 from app.models.user import AccountStatus, User, UserRole
 from app.services.notifications import create_notification
 from app.models.restaurant import Restaurant, RestaurantStatus
@@ -36,10 +37,19 @@ def get_manager_requests(
         requests = query.order_by(Restaurant.created_at.asc()).all()
     else:
         counts = {"ALL": query.count()}
-        for value in ("PENDING", "APPROVED", "REJECTED"):
+        for value in (
+            RestaurantStatus.PENDING.value,
+            RestaurantStatus.APPROVED.value,
+            RestaurantStatus.REJECTED.value,
+        ):
             counts[value] = query.filter(Restaurant.status == value).count()
         if status != "ALL":
-            if status not in {"PENDING", "APPROVED", "REJECTED", "SUSPENDED"}:
+            if status not in {
+                RestaurantStatus.PENDING.value,
+                RestaurantStatus.APPROVED.value,
+                RestaurantStatus.REJECTED.value,
+                RestaurantStatus.SUSPENDED.value,
+            }:
                 raise HTTPException(422, "Invalid application status.")
             query = query.filter(Restaurant.status == status)
         if search.strip():
@@ -289,7 +299,7 @@ def approve_manager(
     manager.is_active = True
     restaurant.status = RestaurantStatus.APPROVED
 
-    create_notification(db, manager, notification_type="restaurant.approved", category="APPROVAL",
+    create_notification(db, manager, notification_type=NotificationType.RESTAURANT_APPROVED, category=NotificationCategory.APPROVAL,
         title="Restaurant application approved", message=f"{restaurant.name} is approved and ready to manage.",
         restaurant_id=restaurant.id, entity_type="restaurant", entity_id=restaurant.id,
         action_url="/manager/dashboard", dedupe_key=f"restaurant:{restaurant.id}:approved")
@@ -351,10 +361,10 @@ def reject_manager(
     manager.is_active = False
     restaurant.status = RestaurantStatus.REJECTED
 
-    create_notification(db, manager, notification_type="restaurant.rejected", category="APPROVAL",
+    create_notification(db, manager, notification_type=NotificationType.RESTAURANT_REJECTED, category=NotificationCategory.APPROVAL,
         title="Restaurant application update", message="Your restaurant application was not approved.",
         restaurant_id=restaurant.id, entity_type="restaurant", entity_id=restaurant.id,
-        action_url="/manager/pending", priority="HIGH", dedupe_key=f"restaurant:{restaurant.id}:rejected")
+        action_url="/manager/pending", priority=NotificationPriority.HIGH, dedupe_key=f"restaurant:{restaurant.id}:rejected")
 
     db.commit()
     db.refresh(manager)

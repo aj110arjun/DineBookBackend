@@ -5,7 +5,7 @@ class ManagerRegisterRequest(BaseModel):
     # Manager details
     name: str = Field(min_length=2, max_length=120)
     email: EmailStr
-    password: str = Field(min_length=10, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
 
     # Restaurant details
     restaurant_name: str = Field(min_length=2, max_length=255)

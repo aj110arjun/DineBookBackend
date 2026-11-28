@@ -15,9 +15,17 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from app.db.database import get_db
+from app.models.notifications import NotificationCategory, NotificationType
 from app.core.config import settings
 from app.models.user import User, UserRole
-from app.models.wallet import WalletAccount, WalletTopUp, WalletTransaction, WalletTransfer
+from app.models.payment_values import PaymentMethod, PaymentStatus
+from app.models.wallet import (
+    WalletAccount,
+    WalletTopUp,
+    WalletTransaction,
+    WalletTransactionType,
+    WalletTransfer,
+)
 from app.models.realtime import RealtimeEvent
 from app.services.notifications import create_notification
 from app.routers.auth.admin_auth import current_admin
@@ -88,10 +96,10 @@ def get_wallet_activity(
             WalletTransaction.reference.ilike(needle),
             WalletTransaction.reservation_id.cast(String).ilike(needle),
         ))
-    if transaction_type == "CREDIT":
-        query = query.filter(or_(WalletTransaction.transaction_type.in_(["CREDIT", "REFUND"]), WalletTransaction.amount > 0))
-    elif transaction_type == "DEBIT":
-        query = query.filter(or_(WalletTransaction.transaction_type == "DEBIT", WalletTransaction.amount < 0))
+    if transaction_type == WalletTransactionType.CREDIT:
+        query = query.filter(or_(WalletTransaction.transaction_type.in_([WalletTransactionType.CREDIT, WalletTransactionType.REFUND]), WalletTransaction.amount > 0))
+    elif transaction_type == WalletTransactionType.DEBIT:
+        query = query.filter(or_(WalletTransaction.transaction_type == WalletTransactionType.DEBIT, WalletTransaction.amount < 0))
     if date_from:
         query = query.filter(WalletTransaction.created_at >= datetime.combine(date_from, time.min, tzinfo=timezone.utc))
     if date_to:
@@ -154,7 +162,7 @@ def manual_topup(payload: WalletTopUpRequest, customer: User = Depends(current_c
         db.flush()
     account.balance = Decimal(account.balance) + payload.amount
     transaction = WalletTransaction(
-        user_id=customer.id, amount=payload.amount, transaction_type="CREDIT",
+        user_id=customer.id, amount=payload.amount, transaction_type=WalletTransactionType.CREDIT,
         description="Manual wallet top-up (test mode)", reference="Test mode credit; no payment collected"
         )
     db.add(transaction)
@@ -183,13 +191,13 @@ def record_manager_topup_failure(payload: WalletTopUpFailure, manager: User = De
     ).with_for_update().first()
     if topup is None:
         raise HTTPException(status_code=404, detail="Wallet top-up order not found.")
-    if topup.status == "PAID":
+    if topup.status == PaymentStatus.PAID:
         return {"message": "This top-up was already completed.", "status": topup.status}
-    topup.status = "FAILED"
+    topup.status = PaymentStatus.FAILED
     if payload.razorpay_payment_id:
         topup.razorpay_payment_id = payload.razorpay_payment_id
     db.add(RealtimeEvent(user_id=manager.id, event_type="payment.status_changed",
-        resource_id=str(topup.id), data={"status": "FAILED", "resource_type": "wallet_topup"}))
+        resource_id=str(topup.id), data={"status": PaymentStatus.FAILED, "resource_type": "wallet_topup"}))
     db.commit()
     return {"message": "Failed wallet payment recorded.", "status": topup.status}
 
@@ -247,7 +255,7 @@ def verify_user_topup(payload: WalletTopUpVerification, user: User, db: Session)
     if topup is None:
         raise HTTPException(status_code=404, detail="Wallet top-up order not found.")
 
-    if topup.status == "PAID":
+    if topup.status == PaymentStatus.PAID:
         account = get_or_create_wallet(db, user.id)
         return {"message": "Wallet top-up already applied.", "balance": float(account.balance)}
 
@@ -269,16 +277,16 @@ def verify_user_topup(payload: WalletTopUpVerification, user: User, db: Session)
     account = get_or_create_wallet(db, user.id, lock=True)
     account.balance = Decimal(account.balance) + Decimal(topup.amount)
 
-    topup.status = "PAID"
+    topup.status = PaymentStatus.PAID
     topup.razorpay_payment_id = payload.razorpay_payment_id
     topup.paid_at = datetime.now(timezone.utc)
 
-    transaction = WalletTransaction(user_id=user.id, amount=topup.amount, transaction_type="CREDIT",
+    transaction = WalletTransaction(user_id=user.id, amount=topup.amount, transaction_type=WalletTransactionType.CREDIT,
         description="Wallet top-up", reference=payload.razorpay_payment_id)
     db.add(transaction)
     notify_wallet_transaction(db, transaction)
     db.add(RealtimeEvent(user_id=user.id, event_type="payment.status_changed",
-        resource_id=str(topup.id), data={"status": "PAID", "resource_type": "wallet_topup"}))
+        resource_id=str(topup.id), data={"status": PaymentStatus.PAID, "resource_type": "wallet_topup"}))
     db.commit()
     db.refresh(account)
     return {"message": "Wallet top-up successful.", "balance": float(account.balance)}
@@ -291,13 +299,13 @@ def record_user_topup_failure(payload: WalletTopUpFailure, user: User, db: Sessi
     ).with_for_update().first()
     if topup is None:
         raise HTTPException(status_code=404, detail="Wallet top-up order not found.")
-    if topup.status == "PAID":
+    if topup.status == PaymentStatus.PAID:
         return {"message": "This top-up was already completed.", "status": topup.status}
-    topup.status = "FAILED"
+    topup.status = PaymentStatus.FAILED
     if payload.razorpay_payment_id:
         topup.razorpay_payment_id = payload.razorpay_payment_id
     db.add(RealtimeEvent(user_id=user.id, event_type="payment.status_changed",
-        resource_id=str(topup.id), data={"status": "FAILED", "resource_type": "wallet_topup"}))
+        resource_id=str(topup.id), data={"status": PaymentStatus.FAILED, "resource_type": "wallet_topup"}))
     db.commit()
     return {"message": "Failed wallet payment recorded.", "status": topup.status}
 
@@ -362,7 +370,7 @@ def verify_manager_topup(payload: WalletTopUpVerification, manager: User = Depen
     if topup is None:
         raise HTTPException(status_code=404, detail="Wallet top-up order not found.")
 
-    if topup.status == "PAID":
+    if topup.status == PaymentStatus.PAID:
         account = get_or_create_wallet(db, manager.id)
         return {"message": "Wallet top-up already applied.", "balance": float(account.balance)}
 
@@ -383,16 +391,16 @@ def verify_manager_topup(payload: WalletTopUpVerification, manager: User = Depen
         
     account = get_or_create_wallet(db, manager.id, lock=True)
     account.balance = Decimal(account.balance) + Decimal(topup.amount)
-    topup.status = "PAID"
+    topup.status = PaymentStatus.PAID
     topup.razorpay_payment_id = payload.razorpay_payment_id
     topup.paid_at = datetime.now(timezone.utc)
 
-    transaction = WalletTransaction(user_id=manager.id, amount=topup.amount, transaction_type="CREDIT",
+    transaction = WalletTransaction(user_id=manager.id, amount=topup.amount, transaction_type=WalletTransactionType.CREDIT,
         description="Manager wallet top-up", reference=payload.razorpay_payment_id)
     db.add(transaction)
     notify_wallet_transaction(db, transaction)
     db.add(RealtimeEvent(user_id=manager.id, event_type="payment.status_changed",
-        resource_id=str(topup.id), data={"status": "PAID", "resource_type": "wallet_topup"}))
+        resource_id=str(topup.id), data={"status": PaymentStatus.PAID, "resource_type": "wallet_topup"}))
     db.commit()
     db.refresh(account)
     return {"message": "Wallet top-up successful.", "balance": float(account.balance)}
@@ -426,9 +434,9 @@ def transfer_to_chef(payload: WalletTransferRequest, manager: User = Depends(cur
     manager_account.balance = Decimal(manager_account.balance) - payload.amount
     chef_account.balance = Decimal(chef_account.balance) + payload.amount
     db.add(transfer)
-    manager_transaction = WalletTransaction(user_id=manager.id, amount=-payload.amount, transaction_type="DEBIT",
+    manager_transaction = WalletTransaction(user_id=manager.id, amount=-payload.amount, transaction_type=WalletTransactionType.DEBIT,
         description=f"Transfer to Chef {chef.name}", reference=f"wallet-transfer:{payload.idempotency_key}")
-    chef_transaction = WalletTransaction(user_id=chef.id, amount=payload.amount, transaction_type="CREDIT",
+    chef_transaction = WalletTransaction(user_id=chef.id, amount=payload.amount, transaction_type=WalletTransactionType.CREDIT,
         description=f"Wallet transfer from Manager {manager.name}", reference=f"wallet-transfer:{payload.idempotency_key}")
     db.add(manager_transaction)
     db.add(chef_transaction)
@@ -438,7 +446,7 @@ def transfer_to_chef(payload: WalletTransferRequest, manager: User = Depends(cur
         resource_id=str(payload.idempotency_key), data={"amount": float(payload.amount), "chef_id": str(chef.id)}))
     db.add(RealtimeEvent(user_id=chef.id, event_type="wallet.transfer_received",
         resource_id=str(payload.idempotency_key), data={"amount": float(payload.amount), "manager_id": str(manager.id)}))
-    create_notification(db, chef, notification_type="wallet.transfer.received", category="PAYMENT",
+    create_notification(db, chef, notification_type=NotificationType.WALLET_TRANSFER_RECEIVED, category=NotificationCategory.PAYMENT,
         title="Money received in your wallet", message=f"{manager.name} transferred ₹{payload.amount:.2f} to your DineBook wallet.",
         entity_type="wallet_transfer", entity_id=payload.idempotency_key, action_url="/chef/revenue",
         dedupe_key=f"wallet-transfer:{payload.idempotency_key}:received")
@@ -479,13 +487,13 @@ def record_topup_failure(payload: WalletTopUpFailure, customer: User = Depends(c
     ).with_for_update().first()
     if topup is None:
         raise HTTPException(status_code=404, detail="Wallet top-up order not found.")
-    if topup.status == "PAID":
+    if topup.status == PaymentStatus.PAID:
         return {"message": "This top-up was already completed.", "status": topup.status}
-    topup.status = "FAILED"
+    topup.status = PaymentStatus.FAILED
     if payload.razorpay_payment_id:
         topup.razorpay_payment_id = payload.razorpay_payment_id
     db.add(RealtimeEvent(user_id=customer.id, event_type="payment.status_changed",
-        resource_id=str(topup.id), data={"status": "FAILED", "resource_type": "wallet_topup"}))
+        resource_id=str(topup.id), data={"status": PaymentStatus.FAILED, "resource_type": "wallet_topup"}))
     db.commit()
     return {"message": "Failed wallet payment recorded.", "status": topup.status}
 
@@ -499,7 +507,7 @@ def verify_topup(payload: WalletTopUpVerification, customer: User = Depends(curr
     if topup is None:
         raise HTTPException(status_code=404, detail="Wallet top-up order not found.")
 
-    if topup.status == "PAID":
+    if topup.status == PaymentStatus.PAID:
         account = db.query(WalletAccount).filter(WalletAccount.user_id == customer.id).first()
         return {"message": "Wallet top-up already applied.", "balance": float(account.balance if account else 0)}
 
@@ -519,15 +527,15 @@ def verify_topup(payload: WalletTopUpVerification, customer: User = Depends(curr
         db.add(account)
         db.flush()
     account.balance = Decimal(account.balance) + Decimal(topup.amount)
-    topup.status = "PAID"
+    topup.status = PaymentStatus.PAID
     topup.razorpay_payment_id = payload.razorpay_payment_id
     topup.paid_at = datetime.now(timezone.utc)
-    transaction = WalletTransaction(user_id=customer.id, amount=topup.amount, transaction_type="CREDIT",
+    transaction = WalletTransaction(user_id=customer.id, amount=topup.amount, transaction_type=WalletTransactionType.CREDIT,
         description="Wallet top-up", reference=payload.razorpay_payment_id)
     db.add(transaction)
     notify_wallet_transaction(db, transaction)
     db.add(RealtimeEvent(user_id=customer.id, event_type="payment.status_changed",
-        resource_id=str(topup.id), data={"status": "PAID", "resource_type": "wallet_topup"}))
+        resource_id=str(topup.id), data={"status": PaymentStatus.PAID, "resource_type": "wallet_topup"}))
     db.commit()
     db.refresh(account)
     return {"message": "Wallet top-up successful.", "balance": float(account.balance)}
@@ -544,7 +552,7 @@ def credit_wallet(payload: AdminWalletCredit, admin: User = Depends(current_admi
         db.add(account)
         db.flush()
     account.balance = Decimal(account.balance) + payload.amount
-    transaction = WalletTransaction(user_id=customer.id, amount=payload.amount, transaction_type="CREDIT",
+    transaction = WalletTransaction(user_id=customer.id, amount=payload.amount, transaction_type=WalletTransactionType.CREDIT,
         description=payload.description, reference=payload.reference or f"Admin credit by {admin.email}")
     db.add(transaction)
     notify_wallet_transaction(db, transaction)

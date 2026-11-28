@@ -4,6 +4,7 @@ import textwrap
 from decimal import Decimal
 
 from app.models.dining import DiningTable
+from app.models.payment_values import PaymentMethod, PaymentStatus
 from app.models.reservation import Reservation
 from app.models.restaurant import Restaurant
 from app.models.user import User
@@ -47,7 +48,7 @@ def build_reservation_invoice_pdf(
         text(375, 780, 8, "INVOICE DATE", "0.40 0.44 0.46")
         text(375, 764, 9, item.created_at.strftime("%d %b %Y") if item.created_at else "—")
         text(375, 740, 8, "RESERVATION PAYMENT", "0.40 0.44 0.46")
-        text(375, 724, 9, "PAID", "0.10 0.40 0.27")
+        text(375, 724, 9, PaymentStatus.PAID.value, "0.10 0.40 0.27")
         commands.append("0.06 0.39 0.43 RG 0.8 w 48 703 m 547 703 l S")
         if continued:
             text(48, 680, 8, "ITEMS - CONTINUED", "0.40 0.44 0.46")
@@ -166,8 +167,12 @@ def build_reservation_invoice_pdf(
 
 
 def _status(method: str | None, status: str | None, amount: Decimal) -> str:
-    if status == "PAID":
-        return "Paid via " + {"WALLET": "DineBook wallet", "RAZORPAY": "Razorpay", "PAY_AT_DESK": "restaurant"}.get(method or "", "payment method")
-    if method == "PAY_AT_DESK":
+    if status == PaymentStatus.PAID:
+        return "Paid via " + {
+            PaymentMethod.WALLET: "DineBook wallet",
+            PaymentMethod.RAZORPAY: "Razorpay",
+            PaymentMethod.PAY_AT_DESK: "restaurant",
+        }.get(method or "", "payment method")
+    if method == PaymentMethod.PAY_AT_DESK:
         return f"Pay at restaurant · {_money(amount)} due"
-    return f"{(status or 'PENDING').replace('_', ' ').title()} · {_money(amount)} due"
+    return f"{(status or PaymentStatus.PENDING.value).replace('_', ' ').title()} · {_money(amount)} due"

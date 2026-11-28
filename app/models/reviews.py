@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from enum import Enum
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID
@@ -10,6 +11,28 @@ from app.db.database import Base
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class ReviewStatus(str, Enum):
+    PUBLISHED = "PUBLISHED"
+    HIDDEN = "HIDDEN"
+    REMOVED = "REMOVED"
+    REJECTED = "REJECTED"
+
+
+class ReviewFlagStatus(str, Enum):
+    PENDING = "PENDING"
+    RESOLVED = "RESOLVED"
+    DISMISSED = "DISMISSED"
+
+
+class ReviewModerationAction(str, Enum):
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+    HIDE = "HIDE"
+    RESTORE = "RESTORE"
+    DISMISS_FLAG = "DISMISS_FLAG"
+    DELETE = "DELETE"
 
 
 class Review(Base):
@@ -23,7 +46,7 @@ class Review(Base):
     order_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("food_orders.id", ondelete="RESTRICT"), nullable=True)
     rating: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PUBLISHED")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default=ReviewStatus.PUBLISHED.value)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc, onupdate=now_utc)
 
@@ -43,7 +66,7 @@ class ReviewFlag(Base):
     manager_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True)
     reason: Mapped[str] = mapped_column(String(40), nullable=False)
     explanation: Mapped[str | None] = mapped_column(String(1000), nullable=True)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default=ReviewFlagStatus.PENDING.value)
     resolution_note: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

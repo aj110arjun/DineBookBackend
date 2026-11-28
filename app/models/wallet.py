@@ -1,12 +1,20 @@
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from enum import Enum
 
 from sqlalchemy import DateTime, ForeignKey, Index, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.database import Base
+from app.models.payment_values import PaymentStatus
+
+
+class WalletTransactionType(str, Enum):
+    CREDIT = "CREDIT"
+    DEBIT = "DEBIT"
+    REFUND = "REFUND"
 
 
 class WalletAccount(Base):
@@ -43,7 +51,7 @@ class WalletTopUp(Base):
     razorpay_order_id: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
     razorpay_payment_id: Mapped[str | None] = mapped_column(String(80), nullable=True, unique=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default=PaymentStatus.PENDING.value)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

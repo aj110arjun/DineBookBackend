@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from enum import Enum
 
 from sqlalchemy import (
     Boolean,
@@ -23,6 +24,35 @@ from app.db.database import Base
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class OfferApplicationMode(str, Enum):
+    AUTOMATIC = "AUTOMATIC"
+    COUPON = "COUPON"
+
+
+class OfferDiscountType(str, Enum):
+    PERCENTAGE = "PERCENTAGE"
+    FIXED = "FIXED"
+
+
+class OfferApplicability(str, Enum):
+    RESTAURANT = "RESTAURANT"
+    ITEMS = "ITEMS"
+    CATEGORIES = "CATEGORIES"
+
+
+class OfferStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    SCHEDULED = "SCHEDULED"
+    EXPIRED = "EXPIRED"
+    EXHAUSTED = "EXHAUSTED"
+
+
+class OfferRedemptionStatus(str, Enum):
+    APPLIED = "APPLIED"
+    REVERSED = "REVERSED"
 
 
 class FoodOrderOffer(Base):
@@ -50,6 +80,7 @@ class FoodOrderOffer(Base):
             "applicability IN ('RESTAURANT', 'ITEMS', 'CATEGORIES')",
             name="ck_food_order_offer_applicability",
         ),
+        CheckConstraint("application_mode IN ('AUTOMATIC', 'COUPON')", name="ck_food_order_offer_application_mode"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -64,6 +95,9 @@ class FoodOrderOffer(Base):
     code: Mapped[str] = mapped_column(
         String(40), nullable=False
     )
+    application_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=OfferApplicationMode.AUTOMATIC.value, server_default="AUTOMATIC"
+    )
     title: Mapped[str] = mapped_column(
         String(120), nullable=False, default="Offer"
     )
@@ -71,7 +105,7 @@ class FoodOrderOffer(Base):
         Text, nullable=True
     )
     discount_type: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="PERCENTAGE"
+        String(16), nullable=False, default=OfferDiscountType.PERCENTAGE.value
     )
     discount_percent: Mapped[Decimal] = mapped_column(
         Numeric(10, 2), nullable=False
@@ -86,7 +120,7 @@ class FoodOrderOffer(Base):
         Integer, nullable=True
     )
     applicability: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="RESTAURANT"
+        String(16), nullable=False, default=OfferApplicability.RESTAURANT.value
     )
 
     eligible_foods: Mapped[list["OfferEligibleFood"]] = relationship(
@@ -190,7 +224,7 @@ class OfferRedemption(Base):
     __tablename__ = "offer_redemptions"
     __table_args__ = (
         UniqueConstraint(
-            "order_id", name="uq_offer_redemptions_order"
+            "order_id", "offer_id", name="uq_offer_redemptions_order_offer"
         ),
         Index(
             "ix_offer_redemptions_offer_customer",
@@ -221,7 +255,7 @@ class OfferRedemption(Base):
         Numeric(10, 2), nullable=False
     )
     status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="APPLIED"
+        String(16), nullable=False, default=OfferRedemptionStatus.APPLIED.value
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=now_utc

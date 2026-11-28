@@ -8,15 +8,22 @@ from sqlalchemy.orm import Session
 
 from app.core.security import decode_access_token
 from app.db.database import get_db
-from app.models.notifications import Notification, NotificationPreference
+from app.models.notifications import Notification, NotificationCategory, NotificationPreference, NotificationPriority
 from app.models.user import AccountStatus, User, UserRole
 from app.routers.auth.admin_auth import ACCESS_COOKIE, current_admin
 from app.routers.auth.chef_auth import current_chef
 from app.routers.auth.customer_auth import current_customer
 from app.routers.auth.manager_auth import current_manager
+from app.services.customer_settings import CATEGORY_FIELDS, notification_values
+from app.services.manager_settings import MANAGER_CATEGORY_FIELDS, manager_notification_values
+from app.services.chef_settings import CHEF_CATEGORY_FIELDS, chef_notification_values
+from app.services.admin_settings import (
+    ADMIN_CATEGORY_FIELDS,
+    admin_notification_values,
+)
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
-CATEGORIES = {"RESERVATION", "ORDER", "PAYMENT", "REVIEW", "STAFF", "APPROVAL", "SYSTEM"}
+CATEGORIES = {category.value for category in NotificationCategory}
 
 
 def _user(token: str | None, db: Session) -> User:
@@ -70,7 +77,7 @@ def list_notifications(unread: bool | None = None, category: str | None = None,
         query = query.filter(Notification.category == category)
     if priority:
         priority = priority.upper()
-        if priority not in {"LOW", "NORMAL", "HIGH", "CRITICAL"}:
+        if priority not in {value.value for value in NotificationPriority}:
             raise HTTPException(400, "Unknown notification priority.")
         query = query.filter(Notification.priority == priority)
     total = query.count()
@@ -86,13 +93,28 @@ def unread_count(token: str | None = Cookie(default=None, alias=ACCESS_COOKIE), 
 
 
 class PreferenceUpdate(BaseModel):
-    preferences: dict[str, bool] = Field(max_length=7)
+    preferences: dict[str, bool] = Field(max_length=8)
 
 
 @router.get("/preferences")
 def get_preferences(token: str | None = Cookie(default=None, alias=ACCESS_COOKIE), db: Session = Depends(get_db)) -> dict:
     user = _user(token, db)
     configured = {row.category: row.enabled for row in db.query(NotificationPreference).filter_by(user_id=user.id).all()}
+    if user.role == UserRole.CUSTOMER:
+        values = notification_values(db, user.id)
+        configured.update({category: all(values[field] for field in fields) for category, fields in CATEGORY_FIELDS.items()})
+    elif user.role == UserRole.MANAGER:
+        values = manager_notification_values(db, user.id)
+        configured.update({category: all(values[field] for field in fields) for category, fields in MANAGER_CATEGORY_FIELDS.items()})
+    elif user.role == UserRole.CHEF:
+        values = chef_notification_values(db, user.id)
+        configured.update({category: all(values[field] for field in fields) for category, fields in CHEF_CATEGORY_FIELDS.items()})
+    elif user.role == UserRole.ADMIN:
+        values = admin_notification_values(db, user.id)
+        configured.update({
+            category: all(values[field] for field in fields)
+            for category, fields in ADMIN_CATEGORY_FIELDS.items()
+        })
     return {"preferences": {category: configured.get(category, True) for category in sorted(CATEGORIES)}}
 
 
@@ -102,14 +124,47 @@ def update_preferences(payload: PreferenceUpdate, token: str | None = Cookie(def
     user = _user(token, db)
     if any(key.upper() not in CATEGORIES for key in payload.preferences):
         raise HTTPException(400, "Unknown notification category.")
-    for category, enabled in payload.preferences.items():
-        category = category.upper()
+    db.query(User).filter_by(id=user.id).with_for_update().one()
+    for category, enabled in {key.upper(): value for key, value in payload.preferences.items()}.items():
         row = db.query(NotificationPreference).filter_by(user_id=user.id, category=category).first()
         if row is None:
             row = NotificationPreference(user_id=user.id, category=category, enabled=enabled)
             db.add(row)
         else:
             row.enabled = enabled
+        if user.role in {
+            UserRole.CUSTOMER,
+            UserRole.MANAGER,
+            UserRole.CHEF,
+            UserRole.ADMIN,
+        }:
+            fields = {
+                UserRole.CUSTOMER: CATEGORY_FIELDS,
+                UserRole.MANAGER: MANAGER_CATEGORY_FIELDS,
+                UserRole.CHEF: CHEF_CATEGORY_FIELDS,
+                UserRole.ADMIN: ADMIN_CATEGORY_FIELDS,
+            }[user.role]
+
+            for field in fields.get(category, ()):
+                granular = (
+                    db.query(NotificationPreference)
+                    .filter_by(
+                        user_id=user.id,
+                        category=field.upper(),
+                    )
+                    .first()
+                )
+
+                if granular is None:
+                    db.add(
+                        NotificationPreference(
+                            user_id=user.id,
+                            category=field.upper(),
+                            enabled=enabled,
+                        )
+                    )
+                else:
+                    granular.enabled = enabled
     db.commit()
     return get_preferences(token, db)
 
