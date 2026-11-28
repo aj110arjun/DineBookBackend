@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from app.db.database import SessionLocal
 from app.models.orders import FoodOrder
+from app.models.payment_values import PaymentSource, PaymentStatus
 from app.models.reservation import Reservation
 from app.models.revenue import PlatformCommission
 from app.routers.commerce.revenue import sync_commission_records
@@ -13,14 +14,14 @@ from app.services.restaurant_wallet import locked_restaurant
 
 
 def source_refunded(db, record):
-    if record.source_type == "FOOD_ORDER":
+    if record.source_type == PaymentSource.FOOD_ORDER:
         row = db.get(FoodOrder, record.source_id)
-        return row is not None and row.payment_status == "REFUNDED"
+        return row is not None and row.payment_status == PaymentStatus.REFUNDED
     row = db.get(Reservation, record.source_id)
     if row is None:
         return False
-    status = row.payment_status if record.source_type == "RESERVATION_FEE" else row.preorder_payment_status
-    return status == "REFUNDED"
+    status = row.payment_status if record.source_type == PaymentSource.RESERVATION_FEE else row.preorder_payment_status
+    return status == PaymentStatus.REFUNDED
 
 
 def reconcile(db, *, apply=False, backfill_rate=None):

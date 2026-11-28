@@ -1,17 +1,17 @@
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
 import uuid
 
 from pydantic import BaseModel
 
+from app.models.payment_values import LedgerEntryType
 from app.schemas.manager_ledger import LedgerExportQuery, LedgerQuery
 
 
 class AdminLedgerEntry(BaseModel):
     id: str
     occurred_at: datetime
-    kind: Literal["COLLECTION", "REFUND", "SETTLEMENT"]
+    kind: LedgerEntryType
     restaurant_id: uuid.UUID | None
     restaurant_name: str
     source_type: str

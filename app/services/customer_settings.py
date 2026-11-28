@@ -11,17 +11,18 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.customer_settings import CustomerSettings
-from app.models.notifications import NotificationPreference
+from app.models.notifications import NotificationCategory, NotificationPreference, NotificationType
+from app.models.wallet import WalletTransactionType
 from app.models.user import User
 from app.schemas.customer_settings import GeneralSettings, NotificationSettings
 
 NOTIFICATION_DEFAULTS = NotificationSettings().model_dump()
 CATEGORY_FIELDS = {
-    "RESERVATION": ("reservation_confirmation", "reservation_reminders", "reservation_updates"),
-    "ORDER": ("order_confirmation", "order_status_updates", "order_completion"),
-    "PAYMENT": ("payment_confirmation", "refund_updates", "wallet_transactions"),
-    "REVIEW": ("review_updates",),
-    "PROMOTION": ("promotional_offers",),
+    NotificationCategory.RESERVATION: ("reservation_confirmation", "reservation_reminders", "reservation_updates"),
+    NotificationCategory.ORDER: ("order_confirmation", "order_status_updates", "order_completion"),
+    NotificationCategory.PAYMENT: ("payment_confirmation", "refund_updates", "wallet_transactions"),
+    NotificationCategory.REVIEW: ("review_updates",),
+    NotificationCategory.PROMOTION: ("promotional_offers",),
 }
 
 
@@ -78,7 +79,7 @@ def settings_response(db: Session, customer: User, *, section: str | None = None
 
 def notification_field(notification_type: str, category: str, metadata: dict | None = None) -> str | None:
     kind = notification_type.lower()
-    if kind.startswith(("promotion.", "promotional.", "offer.", "marketing.")) or category == "PROMOTION":
+    if kind.startswith(("promotion.", "promotional.", "offer.", "marketing.")) or category == NotificationCategory.PROMOTION:
         return "promotional_offers"
     if kind.startswith("reservation."):
         if kind in {"reservation.confirmed", "reservation.confirmation"}:
@@ -88,13 +89,13 @@ def notification_field(notification_type: str, category: str, metadata: dict | N
         if kind in {"order.placed", "order.confirmed", "order.confirmation"}:
             return "order_confirmation"
         return "order_completion" if kind in {"order.completed", "order.completion"} else "order_status_updates"
-    if "refund" in kind or (metadata or {}).get("transaction_type") == "REFUND":
+    if "refund" in kind or (metadata or {}).get("transaction_type") == WalletTransactionType.REFUND:
         return "refund_updates"
     if kind.startswith("wallet."):
         return "wallet_transactions"
     if kind.startswith("payment."):
         return "payment_confirmation"
-    if kind.startswith("review.") or category == "REVIEW":
+    if kind.startswith("review.") or category == NotificationCategory.REVIEW:
         return "review_updates"
     return None
 
@@ -103,7 +104,9 @@ def customer_notification_allowed(db: Session, customer: User, *, notification_t
                                   category: str, channel: str, metadata: dict | None = None) -> bool:
     # Account protection and required notices have no user-configurable switch.
     if notification_type.startswith(("security.", "account.", "legal.")) or notification_type in {
-        "payment.failed", "wallet.topup.failed", "system.incident",
+        NotificationType.PAYMENT_FAILED.value,
+        NotificationType.WALLET_TOPUP_FAILED.value,
+        NotificationType.SYSTEM_INCIDENT.value,
     }:
         return True
     values = notification_values(db, customer.id)

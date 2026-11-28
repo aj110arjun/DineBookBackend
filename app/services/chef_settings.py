@@ -1,9 +1,12 @@
-from app.models.notifications import NotificationPreference
+from app.models.notifications import NotificationCategory, NotificationPreference, NotificationType
 from app.schemas.chef_settings import ChefNotificationSettings
 from app.services.customer_settings import CATEGORY_FIELDS, notification_field, notification_values, settings_response
 
 CHEF_NOTIFICATION_DEFAULTS = ChefNotificationSettings().model_dump()
-CHEF_CATEGORY_FIELDS = {category: CATEGORY_FIELDS[category] for category in ("ORDER", "PAYMENT")}
+CHEF_CATEGORY_FIELDS = {
+    category: CATEGORY_FIELDS[category]
+    for category in (NotificationCategory.ORDER, NotificationCategory.PAYMENT)
+}
 
 
 def chef_notification_values(db, chef_id):
@@ -18,7 +21,10 @@ def chef_settings_response(db, chef, **kwargs):
 
 def chef_notification_allowed(db, chef, *, notification_type, category, metadata=None):
     if notification_type.startswith(("security.", "account.", "legal.")) or notification_type in {
-        "restaurant.suspended", "system.incident", "payment.failed", "wallet.topup.failed",
+        NotificationType.RESTAURANT_SUSPENDED.value,
+        NotificationType.SYSTEM_INCIDENT.value,
+        NotificationType.PAYMENT_FAILED.value,
+        NotificationType.WALLET_TOPUP_FAILED.value,
     }:
         return True
     values = chef_notification_values(db, chef.id)

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.config import settings
 from app.core.security import create_access_token, decode_access_token, verify_secret, session_is_current, validate_new_password
 from app.db.database import get_db
-from app.models.restaurant import Restaurant
+from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.menu import Category, Food
 from app.models.user import AccountStatus, User, UserRole
 from app.services.password_change import save_password
@@ -72,7 +72,7 @@ def current_chef(
     ):
         raise unauthorized
     restaurant = db.query(Restaurant).filter(Restaurant.manager_id == chef.manager_id).first()
-    if restaurant is not None and restaurant.status.value == "SUSPENDED":
+    if restaurant is not None and restaurant.status == RestaurantStatus.SUSPENDED:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This restaurant has been suspended.")
     if chef.must_change_password and (request is None or request.url.path not in {"/api/chef/me", "/api/auth/chef/change-password"}):
         raise HTTPException(status_code=403, detail="Change your temporary password before using the chef portal.")
@@ -136,7 +136,7 @@ def login_chef(
         )
 
     restaurant = db.query(Restaurant).filter(Restaurant.manager_id == chef.manager_id).first()
-    if restaurant is not None and restaurant.status.value == "SUSPENDED":
+    if restaurant is not None and restaurant.status == RestaurantStatus.SUSPENDED:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This restaurant has been suspended.")
 
     if chef.chef_invite_expired:

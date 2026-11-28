@@ -7,12 +7,32 @@ from decimal import Decimal
 from xml.etree.ElementTree import Element, SubElement, tostring
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from app.models.payment_values import PaymentSource
 from app.services.table_availability import RESTAURANT_TIMEZONE
 
 HEADERS = ["Date / time (IST)", "Entry", "Source", "Reference", "Collected (INR)", "Refunded (INR)", "Commission (INR)", "Net change (INR)", "Balance (INR)"]
 SUMMARY = [("opening_balance", "Opening net balance"), ("collected", "Collections"), ("refunded", "Refunds"),
            ("commission", "Commission (net)"), ("net", "Net movement"), ("closing_balance", "Closing net balance")]
-SOURCES = {"FOOD_ORDER": "Food order", "RESERVATION_FEE": "Reservation fee", "PREORDER": "Preorder"}
+SOURCES = {
+    PaymentSource.FOOD_ORDER.value: "Food order",
+    PaymentSource.RESERVATION_FEE.value: "Reservation fee",
+    PaymentSource.PREORDER.value: "Preorder",
+}
+_HELVETICA_WIDTHS = {
+    " ": 278, "(": 333, ")": 333, ",": 278, "-": 333, ".": 278, "/": 278,
+    "0": 556, "1": 556, "2": 556, "3": 556, "4": 556,
+    "5": 556, "6": 556, "7": 556, "8": 556, "9": 556,
+    "A": 667, "B": 667, "C": 722, "D": 722, "E": 667, "F": 611,
+    "G": 778, "H": 722, "I": 278, "J": 500, "K": 667, "L": 556,
+    "M": 833, "N": 722, "O": 778, "P": 667, "Q": 778, "R": 722,
+    "S": 667, "T": 611, "U": 722, "V": 667, "W": 944, "X": 667,
+    "Y": 667, "Z": 611,
+    "a": 556, "b": 556, "c": 500, "d": 556, "e": 556, "f": 278,
+    "g": 556, "h": 556, "i": 222, "j": 222, "k": 500, "l": 222,
+    "m": 833, "n": 556, "o": 556, "p": 556, "q": 556, "r": 333,
+    "s": 500, "t": 278, "u": 556, "v": 500, "w": 722, "x": 500,
+    "y": 500, "z": 500,
+}
 
 
 def format_date_range(start_date, end_date):
@@ -149,8 +169,12 @@ def pdf_text(value):
     return text.encode("cp1252", "replace").decode("cp1252").replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
+def pdf_text_width(value, size):
+    return sum(_HELVETICA_WIDTHS.get(character, 556) for character in str(value)) * size / 1000
+
+
 def ledger_pdf(report):
-    entries = list(rows(report))
+    entries = sorted(rows(report), key=lambda entry: entry[0])
     pages = [entries[index:index + 20] for index in range(0, len(entries), 20)] or [[]]
     streams = []
     widths = [100, 110, 130, 90, 82, 82, 90, 90]
@@ -169,7 +193,12 @@ def ledger_pdf(report):
         text(32, 459, f"Net movement: {report.summary.net:,.2f}   Closing: {report.summary.closing_balance:,.2f}   Total entries: {report.total}", 8)
         commands.append("0.96 0.94 0.93 rg 32 426 778 22 re f")
         x = 36
-        for label, width in zip(headings, widths): text(x, 434, label, 7); x += width
+        for index, (label, width) in enumerate(zip(headings, widths)):
+            if index >= 3:
+                text(x + width - 8 - pdf_text_width(label, 7), 434, label, 7)
+            else:
+                text(x, 434, label, 7)
+            x += width
         y = 414
         for entry in entries:
             values = [entry[0].strftime("%d/%m/%Y %H:%M"), f"{entry[2]} / {entry[1]}", entry[3], *[f"{value:,.2f}" for value in entry[4:]]]
@@ -177,7 +206,7 @@ def ledger_pdf(report):
             for index, (value, width) in enumerate(zip(values, widths)):
                 size = 6 if index == 2 else 7
                 if index >= 3:
-                    text(x + width - 8 - len(value) * size * 0.53, y, value, size)
+                    text(x + width - 8 - pdf_text_width(value, size), y, value, size)
                 else: text(x, y, value, size)
                 x += width
             line(y - 6); y -= 18

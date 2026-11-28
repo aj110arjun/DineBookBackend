@@ -6,6 +6,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.database import get_db
+from app.models.notifications import NotificationCategory, NotificationPriority, NotificationType
 from app.models.restaurant import Restaurant, RestaurantStatus
 from app.models.restaurant_document import RestaurantDocument
 from app.models.restaurant_hours import RestaurantHours
@@ -36,10 +37,10 @@ def suspend_restaurant(restaurant_id: uuid.UUID, payload: SuspensionRequest,
     if restaurant.status != RestaurantStatus.APPROVED:
         raise HTTPException(status_code=409, detail="Only approved restaurants can be suspended.")
     restaurant.status = RestaurantStatus.SUSPENDED
-    create_notification(db, manager, notification_type="restaurant.suspended", category="SYSTEM",
+    create_notification(db, manager, notification_type=NotificationType.RESTAURANT_SUSPENDED, category=NotificationCategory.SYSTEM,
         title="Restaurant temporarily suspended", message="Your restaurant access was suspended by platform administration.",
         restaurant_id=restaurant.id, entity_type="restaurant", entity_id=restaurant.id,
-        action_url="/manager/pending", priority="CRITICAL", dedupe_key=f"restaurant:{restaurant.id}:suspended")
+        action_url="/manager/pending", priority=NotificationPriority.CRITICAL, dedupe_key=f"restaurant:{restaurant.id}:suspended")
     db.commit()
     reason = payload.reason.strip() or "Please contact DineBook support for more information."
     email_sent = False
@@ -66,7 +67,7 @@ def resume_restaurant(restaurant_id: uuid.UUID, admin: User = Depends(current_ad
     restaurant.status = RestaurantStatus.APPROVED
     manager = db.query(User).filter_by(id=restaurant.manager_id).first()
     if manager:
-        create_notification(db, manager, notification_type="restaurant.reactivated", category="SYSTEM",
+        create_notification(db, manager, notification_type=NotificationType.RESTAURANT_REACTIVATED, category=NotificationCategory.SYSTEM,
             title="Restaurant reactivated", message="Your restaurant access has been restored.",
             restaurant_id=restaurant.id, entity_type="restaurant", entity_id=restaurant.id,
             action_url="/manager/dashboard", dedupe_key=f"restaurant:{restaurant.id}:reactivated")
@@ -101,7 +102,7 @@ def list_restaurants(
             query = query.filter(or_(*( (Restaurant.city == city) & (Restaurant.state == state)
                 for _, city, state in options if ", ".join(part for part in (city, state) if part) == location)))
         if status:
-            if status not in {"APPROVED", "SUSPENDED"}:
+            if status not in {RestaurantStatus.APPROVED.value, RestaurantStatus.SUSPENDED.value}:
                 raise HTTPException(422, "Invalid restaurant status.")
             query = query.filter(Restaurant.status == status)
         total = query.count()

@@ -10,7 +10,8 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.models.orders import FoodOrder
+from app.models.orders import FoodOrder, OrderStatus
+from app.models.payment_values import PaymentMethod, PaymentSource, PaymentStatus
 from app.models.revenue import (
     PlatformCommission,
     PlatformCommissionPayout,
@@ -54,22 +55,22 @@ def period_bounds(period: str) -> tuple[datetime, datetime]:
 def gross_revenue(db: Session, manager_ids: list[uuid.UUID] | None, period: str) -> Decimal:
     start, end = period_bounds(period)
     fee_paid_in_period = and_(
-        Reservation.payment_status == "PAID",
-        Reservation.payment_method.in_(("WALLET", "RAZORPAY", "PAY_AT_DESK")),
+        Reservation.payment_status == PaymentStatus.PAID,
+        Reservation.payment_method.in_((PaymentMethod.WALLET, PaymentMethod.RAZORPAY, PaymentMethod.PAY_AT_DESK)),
         func.coalesce(Reservation.paid_at, Reservation.created_at) >= start,
         func.coalesce(Reservation.paid_at, Reservation.created_at) < end,
     )
     preorder_paid_in_period = and_(
-        Reservation.preorder_payment_status == "PAID",
-        Reservation.preorder_payment_method.in_(("WALLET", "RAZORPAY", "PAY_AT_DESK")),
+        Reservation.preorder_payment_status == PaymentStatus.PAID,
+        Reservation.preorder_payment_method.in_((PaymentMethod.WALLET, PaymentMethod.RAZORPAY, PaymentMethod.PAY_AT_DESK)),
         func.coalesce(Reservation.preorder_paid_at, Reservation.paid_at, Reservation.created_at) >= start,
         func.coalesce(Reservation.preorder_paid_at, Reservation.paid_at, Reservation.created_at) < end,
     )
     reservation_query = db.query(Reservation).filter(or_(fee_paid_in_period, preorder_paid_in_period))
     order_query = db.query(FoodOrder).filter(
-        FoodOrder.payment_status == "PAID",
-        FoodOrder.payment_method.in_(("WALLET", "RAZORPAY", "PAY_AT_DESK")),
-        FoodOrder.status.notin_(("CANCELLED", "REJECTED")),
+        FoodOrder.payment_status == PaymentStatus.PAID,
+        FoodOrder.payment_method.in_((PaymentMethod.WALLET, PaymentMethod.RAZORPAY, PaymentMethod.PAY_AT_DESK)),
+        FoodOrder.status.notin_((OrderStatus.CANCELLED, OrderStatus.REJECTED)),
         func.coalesce(FoodOrder.paid_at, FoodOrder.created_at) >= start,
         func.coalesce(FoodOrder.paid_at, FoodOrder.created_at) < end,
     )
@@ -86,12 +87,12 @@ def gross_revenue(db: Session, manager_ids: list[uuid.UUID] | None, period: str)
         fee_paid_at = row.paid_at or row.created_at
         if fee_paid_at.tzinfo is None:
             fee_paid_at = fee_paid_at.replace(tzinfo=timezone.utc)
-        if row.payment_status == "PAID" and start <= fee_paid_at < end:
+        if row.payment_status == PaymentStatus.PAID and start <= fee_paid_at < end:
             total += Decimal(row.fee_amount or 0)
         preorder_paid_at = row.preorder_paid_at or row.paid_at or row.created_at
         if preorder_paid_at.tzinfo is None:
             preorder_paid_at = preorder_paid_at.replace(tzinfo=timezone.utc)
-        if row.preorder_payment_status == "PAID" and start <= preorder_paid_at < end:
+        if row.preorder_payment_status == PaymentStatus.PAID and start <= preorder_paid_at < end:
             total += Decimal(row.preorder_total or 0)
 
     for row in order_query.all():
@@ -105,15 +106,15 @@ def sync_commission_records(db: Session, manager_ids: list[uuid.UUID] | None,
                             commission_percent: Decimal) -> None:
     """Backfill historical records only; never call this from a revenue GET."""
     reservation_query = db.query(Reservation).filter(or_(
-        and_(Reservation.payment_status == "PAID",
-             Reservation.payment_method.in_(("WALLET", "RAZORPAY", "PAY_AT_DESK"))),
-        and_(Reservation.preorder_payment_status == "PAID",
-             Reservation.preorder_payment_method.in_(("WALLET", "RAZORPAY", "PAY_AT_DESK"))),
+        and_(Reservation.payment_status == PaymentStatus.PAID,
+             Reservation.payment_method.in_((PaymentMethod.WALLET, PaymentMethod.RAZORPAY, PaymentMethod.PAY_AT_DESK))),
+        and_(Reservation.preorder_payment_status == PaymentStatus.PAID,
+             Reservation.preorder_payment_method.in_((PaymentMethod.WALLET, PaymentMethod.RAZORPAY, PaymentMethod.PAY_AT_DESK))),
     ))
     order_query = db.query(FoodOrder).filter(
-        FoodOrder.payment_status == "PAID",
-        FoodOrder.payment_method.in_(("WALLET", "RAZORPAY", "PAY_AT_DESK")),
-        FoodOrder.status.notin_(("CANCELLED", "REJECTED")),
+        FoodOrder.payment_status == PaymentStatus.PAID,
+        FoodOrder.payment_method.in_((PaymentMethod.WALLET, PaymentMethod.RAZORPAY, PaymentMethod.PAY_AT_DESK)),
+        FoodOrder.status.notin_((OrderStatus.CANCELLED, OrderStatus.REJECTED)),
     )
     if manager_ids is not None:
         restaurant_ids = [row.id for row in db.query(Restaurant.id).filter(Restaurant.manager_id.in_(manager_ids)).all()]
@@ -147,17 +148,17 @@ def sync_commission_records(db: Session, manager_ids: list[uuid.UUID] | None,
     reservations = reservation_query.all()
     for row in reservations:
         fee_paid_at = row.paid_at or row.created_at
-        if row.payment_status == "PAID" and row.payment_method in ("WALLET", "RAZORPAY", "PAY_AT_DESK"):
-            add_record("RESERVATION_FEE", row.id, row.restaurant_id, Decimal(row.fee_amount or 0), fee_paid_at)
+        if row.payment_status == PaymentStatus.PAID and row.payment_method in (PaymentMethod.WALLET, PaymentMethod.RAZORPAY, PaymentMethod.PAY_AT_DESK):
+            add_record(PaymentSource.RESERVATION_FEE, row.id, row.restaurant_id, Decimal(row.fee_amount or 0), fee_paid_at)
         preorder_paid_at = row.preorder_paid_at or row.paid_at or row.created_at
-        if (row.preorder_payment_status == "PAID" and
-                row.preorder_payment_method in ("WALLET", "RAZORPAY", "PAY_AT_DESK")):
-            add_record("PREORDER", row.id, row.restaurant_id, Decimal(row.preorder_total or 0), preorder_paid_at)
+        if (row.preorder_payment_status == PaymentStatus.PAID and
+                row.preorder_payment_method in (PaymentMethod.WALLET, PaymentMethod.RAZORPAY, PaymentMethod.PAY_AT_DESK)):
+            add_record(PaymentSource.PREORDER, row.id, row.restaurant_id, Decimal(row.preorder_total or 0), preorder_paid_at)
 
     for row in order_query.all():
         if row.reservation_id and row.idempotency_key == uuid.uuid5(PREORDER_ORDER_NAMESPACE, str(row.reservation_id)):
             continue
-        add_record("FOOD_ORDER", row.id, row.restaurant_id, Decimal(row.total or 0), row.paid_at or row.created_at)
+        add_record(PaymentSource.FOOD_ORDER, row.id, row.restaurant_id, Decimal(row.total or 0), row.paid_at or row.created_at)
 
 
 def transferred_total(db: Session, manager_ids: list[uuid.UUID] | None, period: str,
@@ -196,7 +197,7 @@ def wallet_summary(db: Session, manager_ids: list[uuid.UUID] | None, settings: P
             db.flush()
         transactions = db.query(WalletTransaction).filter(WalletTransaction.user_id == chef_id).order_by(WalletTransaction.created_at.desc()).limit(100).all()
         return {
-            "role": "CHEF", "balance": float(wallet.balance), "earned_this_month": float(chef_month),
+            "role": UserRole.CHEF, "balance": float(wallet.balance), "earned_this_month": float(chef_month),
             "earned_this_year": float(chef_year),
             "commission_percent": float(commission_rate),
             "transactions": [{"id": str(row.id), "amount": float(row.amount), "type": row.transaction_type,
@@ -264,7 +265,7 @@ def wallet_summary(db: Session, manager_ids: list[uuid.UUID] | None, settings: P
             db.flush()
         manager_wallet_balance = Decimal(wallet.balance)
     return {
-        "role": "ADMIN" if manager_ids is None else "MANAGER",
+        "role": UserRole.ADMIN if manager_ids is None else UserRole.MANAGER,
         "balance": float(admin_wallet_balance if manager_ids is None else manager_wallet_balance),
         "gross_this_month": float(gross_month), "gross_this_year": float(gross_year),
         "gross_all_time": float(gross_all), "earned_this_month": float(admin_month if manager_ids is None else gross_month - admin_month),

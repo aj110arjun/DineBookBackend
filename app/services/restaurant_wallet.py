@@ -7,9 +7,10 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.models.orders import FoodOrder
+from app.models.payment_values import PaymentSource
 from app.models.restaurant import Restaurant
 from app.models.revenue import PlatformCommission
-from app.models.wallet import WalletTransaction
+from app.models.wallet import WalletTransaction, WalletTransactionType
 from app.services.commission import (
     locked_wallets, money, record_wallet_entry, reverse_payment_commission,
     recipient_admin, settings_row, settle_payment_commission,
@@ -23,7 +24,11 @@ def payment_source(db: Session, restaurant_id: uuid.UUID, reference: str) -> tup
     parts = reference.split(":")
     if (len(parts) == 4 and parts[0] in {"customer-payment", "customer-refund"}
             and parts[1] == "reservation" and parts[3] in {"fee", "preorder"}):
-        return ("RESERVATION_FEE" if parts[3] == "fee" else "PREORDER"), uuid.UUID(parts[2])
+        return (
+            PaymentSource.RESERVATION_FEE.value
+            if parts[3] == "fee"
+            else PaymentSource.PREORDER.value
+        ), uuid.UUID(parts[2])
     if (len(parts) == 3 and parts[0] in {"customer-payment", "customer-refund"}
             and parts[1] == "order"):
         order_id = uuid.UUID(parts[2])
@@ -33,8 +38,8 @@ def payment_source(db: Session, restaurant_id: uuid.UUID, reference: str) -> tup
                 raise HTTPException(status_code=409, detail="Payment source belongs to another restaurant.")
             if (order.reservation_id and order.idempotency_key == uuid.uuid5(
                     PREORDER_ORDER_NAMESPACE, str(order.reservation_id))):
-                return "PREORDER", order.reservation_id
-        return "FOOD_ORDER", order_id
+                return PaymentSource.PREORDER.value, order.reservation_id
+        return PaymentSource.FOOD_ORDER.value, order_id
     raise ValueError(f"Unsupported restaurant payment reference: {reference}")
 
 
@@ -95,7 +100,7 @@ def record_restaurant_payment(db: Session, restaurant_id: uuid.UUID, amount: Dec
         previous = db.query(WalletTransaction.id).filter(
             WalletTransaction.user_id == restaurant.manager_id,
             WalletTransaction.reference == reference,
-            WalletTransaction.transaction_type == "CREDIT",
+            WalletTransaction.transaction_type == WalletTransactionType.CREDIT,
         ).first()
         if previous is None:
             record_wallet_entry(db, account, amount, description, reference)
@@ -118,7 +123,7 @@ def reverse_restaurant_payment(db: Session, restaurant_id: uuid.UUID, amount: De
     manager_id = record.manager_id if record is not None else restaurant.manager_id
     previous = db.query(WalletTransaction.id).filter(
         WalletTransaction.user_id == manager_id, WalletTransaction.reference == reference,
-        WalletTransaction.transaction_type == "DEBIT",
+        WalletTransaction.transaction_type == WalletTransactionType.DEBIT,
     ).first()
     if previous is not None:
         return

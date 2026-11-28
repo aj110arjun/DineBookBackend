@@ -16,8 +16,10 @@ session revocation on every request and again before delivering an answer.
   localhost-only check is replaced by customer authentication. The browser never
   calls Ollama directly.
 - Ollama `qwen3:1.7b` classifies natural-language questions into a fixed Pydantic
-  schema. Explicit quick actions and clear account questions bypass inference.
-  There is at most one model call and one business lookup per turn.
+  schema. For FAQ questions, the same single model call also writes a reply using
+  retrieved FAQ context. Explicit quick actions and clear account questions
+  bypass inference. There is at most one model call and one business lookup per
+  turn.
 - Account figures and statuses are deterministic cards from customer-owned
   records. They are never written by the model. Querying an absent wallet reports
   zero without creating an account. Payment and refund functions never execute.
@@ -29,10 +31,14 @@ session revocation on every request and again before delivering an answer.
 - Approved restaurant discovery, hours, date exceptions, availability and offers
   reuse current application rules. Availability needs a restaurant, date, time
   and party size. A check does not hold a table or guarantee offer eligibility.
-- FAQ retrieval searches a small versioned PostgreSQL knowledge corpus in all
-  three languages. This deliberately avoids loading an embedding model on the
-  8 GB development machine. No pgvector dependency is required. Published FAQ
-  answers and source links remain available when inference is offline.
+- FAQ support uses retrieval-augmented generation: it ranks a small versioned
+  PostgreSQL FAQ corpus using keyword, title, and content matches, including
+  common paraphrases, then supplies up to three matching articles to Ollama.
+  The model is instructed to answer only from those sources; responses include
+  the retrieved article links. Retrieval is lexical rather than embedding-based,
+  deliberately avoiding an embedding model on the 8 GB development machine and
+  any pgvector dependency. If inference is offline or invalid, the system returns
+  the retrieved FAQ text directly, so published answers remain available.
 - The POST SSE endpoint emits preparation status and the final validated answer.
   It does not stream hidden reasoning or provisional financial claims.
 - Human escalation offers a visible conversation-summary copy action and an

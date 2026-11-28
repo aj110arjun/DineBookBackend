@@ -4,20 +4,36 @@ from urllib.parse import urlsplit
 from decimal import Decimal
 from sqlalchemy.orm import Session
 
-from app.models.notifications import Notification, NotificationPreference
+from app.models.notifications import (
+    Notification,
+    NotificationCategory,
+    NotificationChannel,
+    NotificationPreference,
+    NotificationPriority,
+    NotificationType,
+)
 from app.models.realtime import RealtimeEvent
 from app.models.restaurant import Restaurant
 from app.models.user import User, UserRole
-from app.models.wallet import WalletTransaction
+from app.models.wallet import WalletTransaction, WalletTransactionType
 from app.services.customer_settings import customer_notification_allowed
 from app.services.manager_settings import manager_notification_allowed
 from app.services.chef_settings import chef_notification_allowed
 from app.services.admin_settings import admin_notification_allowed
 
-ALLOWED_CATEGORIES = {"RESERVATION", "ORDER", "PAYMENT", "REVIEW", "STAFF", "APPROVAL", "SYSTEM", "PROMOTION"}
-MANDATORY_TYPES = {"payment.failed", "payment.success", "wallet.topup.success", "wallet.topup.failed",
-                   "restaurant.suspended", "system.incident", "reservation.reminder", "review.moderated",
-                   "wallet.transaction", "wallet.credit.issued",}
+ALLOWED_CATEGORIES = frozenset(category.value for category in NotificationCategory)
+MANDATORY_TYPES = frozenset({
+    NotificationType.PAYMENT_FAILED.value,
+    NotificationType.PAYMENT_SUCCESS.value,
+    NotificationType.WALLET_TOPUP_SUCCESS.value,
+    NotificationType.WALLET_TOPUP_FAILED.value,
+    NotificationType.RESTAURANT_SUSPENDED.value,
+    NotificationType.SYSTEM_INCIDENT.value,
+    NotificationType.RESERVATION_REMINDER.value,
+    NotificationType.REVIEW_MODERATED.value,
+    NotificationType.WALLET_TRANSACTION.value,
+    NotificationType.WALLET_CREDIT_ISSUED.value,
+})
 ALLOWED_ACTIONS = {
     "/customer/profile/orders", "/customer/profile/reservations", "/customer/profile/wallet",
     "/customer/profile/reviews", "/manager/orders", "/manager/reservations", "/manager/reviews",
@@ -42,7 +58,7 @@ def _safe_action_url(value: str | None) -> str | None:
 def create_notification(db: Session, recipient: User, *, notification_type: str, category: str,
                         title: str, message: str, restaurant_id: uuid.UUID | None = None,
                         entity_type: str | None = None, entity_id: uuid.UUID | None = None,
-                        action_url: str | None = None, priority: str = "NORMAL",
+                        action_url: str | None = None, priority: str = NotificationPriority.NORMAL.value,
                         dedupe_key: str | None = None, metadata: dict | None = None) -> Notification | None:
     """Persist a safe notification and a recipient scoped wake-up in the caller's transaction."""
     category = category.upper()
@@ -53,7 +69,7 @@ def create_notification(db: Session, recipient: User, *, notification_type: str,
         return None
     if recipient.role == UserRole.CUSTOMER:
         if not customer_notification_allowed(db, recipient, notification_type=notification_type,
-                                             category=category, channel="in_app", metadata=metadata):
+                                             category=category, channel=NotificationChannel.IN_APP.value, metadata=metadata):
             return None
     elif recipient.role == UserRole.MANAGER:
         if not manager_notification_allowed(db, recipient, notification_type=notification_type,
@@ -99,7 +115,7 @@ def notify_order_status(db: Session, order, previous_status: str | None = None) 
     customer = db.query(User).filter_by(id=order.customer_id).first()
     if customer:
         status = str(order.status)
-        create_notification(db, customer, notification_type=f"order.{status.lower()}", category="ORDER",
+        create_notification(db, customer, notification_type=f"order.{status.lower()}", category=NotificationCategory.ORDER,
             title=f"Order {status.lower().replace('_', ' ')}", message=f"Your order status is now {status.lower().replace('_', ' ')}.",
             restaurant_id=order.restaurant_id, entity_type="order", entity_id=order.id,
             action_url="/customer/profile/orders", dedupe_key=f"order:{order.id}:{status}")
@@ -107,7 +123,7 @@ def notify_order_status(db: Session, order, previous_status: str | None = None) 
         recipients = db.query(User).filter(User.id == restaurant.manager_id).all()
         recipients += db.query(User).filter(User.manager_id == restaurant.manager_id, User.role == UserRole.CHEF).all()
         for recipient in recipients:
-            create_notification(db, recipient, notification_type=f"order.{str(order.status).lower()}", category="ORDER",
+            create_notification(db, recipient, notification_type=f"order.{str(order.status).lower()}", category=NotificationCategory.ORDER,
                 title="Order status updated", message=f"An order is now {str(order.status).lower().replace('_', ' ')}.",
                 restaurant_id=order.restaurant_id, entity_type="order", entity_id=order.id,
                 action_url="/chef/orders" if recipient.role == UserRole.CHEF else "/manager/orders",
@@ -118,7 +134,7 @@ def notify_reservation_status(db: Session, reservation) -> None:
     status = str(reservation.status)
     customer = db.query(User).filter_by(id=reservation.user_id).first()
     if customer:
-        create_notification(db, customer, notification_type=f"reservation.{status.lower()}", category="RESERVATION",
+        create_notification(db, customer, notification_type=f"reservation.{status.lower()}", category=NotificationCategory.RESERVATION,
             title=f"Reservation {status.lower().replace('_', ' ')}", message=f"Your reservation status is now {status.lower().replace('_', ' ')}.",
             restaurant_id=reservation.restaurant_id, entity_type="reservation", entity_id=reservation.id,
             action_url=f"/customer/profile/reservations/{reservation.id}",
@@ -126,7 +142,7 @@ def notify_reservation_status(db: Session, reservation) -> None:
     restaurant = db.query(Restaurant).filter_by(id=reservation.restaurant_id).first()
     manager = db.query(User).filter_by(id=restaurant.manager_id).first() if restaurant else None
     if manager:
-        create_notification(db, manager, notification_type=f"reservation.{status.lower()}", category="RESERVATION",
+        create_notification(db, manager, notification_type=f"reservation.{status.lower()}", category=NotificationCategory.RESERVATION,
             title=f"Reservation {status.lower().replace('_', ' ')}", message="A restaurant reservation was updated.",
             restaurant_id=reservation.restaurant_id, entity_type="reservation", entity_id=reservation.id,
             action_url="/manager/reservations", dedupe_key=f"reservation:{reservation.id}:{status}:manager")
@@ -153,8 +169,8 @@ def notify_wallet_transaction(
     }
 
     amount = abs(Decimal(transaction.amount))
-    is_refund = transaction.transaction_type == "REFUND"
-    is_credit = transaction.transaction_type in {"CREDIT", "REFUND"}
+    is_refund = transaction.transaction_type == WalletTransactionType.REFUND
+    is_credit = transaction.transaction_type in {WalletTransactionType.CREDIT, WalletTransactionType.REFUND}
     movement = "credited to" if is_credit else "debited from"
     title = "Wallet refund received" if is_refund else ("Wallet credited" if is_credit else "Wallet debited")
     message = (
@@ -166,8 +182,8 @@ def notify_wallet_transaction(
     create_notification(
         db,
         recipient,
-        notification_type="wallet.transaction",
-        category="PAYMENT",
+        notification_type=NotificationType.WALLET_TRANSACTION,
+        category=NotificationCategory.PAYMENT,
         title=title,
         message=message,
         entity_type="wallet_transaction",

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.customer_ai import CustomerAIConversation as Conversation, CustomerAITurn as Turn, CustomerAIMessage as Message
+from app.models.customer_ai import AIMessageSender, AITurnStatus
 from app.schemas.ai_chat import AIAnswer, AIChatResponse
 
 
@@ -90,11 +91,15 @@ class ConversationRepository:
             turn = db.query(Turn).filter(Turn.conversation_id == conversation.id, Turn.client_message_id == payload.client_message_id).first()
             request_data = payload.model_dump(mode="json", exclude={"client_message_id", "message"})
             if turn:
-                user_message = db.query(Message).filter(Message.turn_id == turn.id, Message.sender == "user").one()
+                user_message = db.query(Message).filter(
+                    Message.turn_id == turn.id, Message.sender == AIMessageSender.USER
+                ).one()
                 if user_message.content != payload.message or turn.tool_metadata.get("request") != request_data:
                     raise HTTPException(409, "This message identifier has already been used.")
-                if turn.status == "complete":
-                    return {"cached": self.response(db.query(Message).filter(Message.turn_id == turn.id, Message.sender == "assistant").one())}
+                if turn.status == AITurnStatus.COMPLETE:
+                    return {"cached": self.response(db.query(Message).filter(
+                        Message.turn_id == turn.id, Message.sender == AIMessageSender.ASSISTANT
+                    ).one())}
             elif db.query(Turn).filter(Turn.conversation_id == conversation.id).count() >= 50:
                 raise HTTPException(422, "Start a new conversation to continue.")
             if not turn:
@@ -114,15 +119,20 @@ class ConversationRepository:
                             tool_metadata={"request": request_data})
                 db.add(turn)
                 db.flush()
-                db.add(Message(conversation_id=conversation.id, turn_id=turn.id, sender="user", content=payload.message))
-            turn.status, turn.error_code = "running", None
+                db.add(Message(conversation_id=conversation.id, turn_id=turn.id,
+                               sender=AIMessageSender.USER, content=payload.message))
+            turn.status, turn.error_code = AITurnStatus.RUNNING, None
             history = [{"role": row.sender, "content": row.content[:400]} for row in db.query(Message)
                 .filter(Message.conversation_id == conversation.id, Message.turn_id != turn.id)
                 .order_by(Message.created_at.desc()).limit(settings.ai_support_max_history_messages).all()][::-1]
-            last_turn = db.query(Turn).filter(Turn.conversation_id == conversation.id, Turn.status == "complete")
+            last_turn = db.query(Turn).filter(
+                Turn.conversation_id == conversation.id, Turn.status == AITurnStatus.COMPLETE
+            )
             last_turn = last_turn.order_by(Turn.created_at.desc()).first()
             previous = last_turn.tool_metadata.get("plan", {}) if last_turn else {}
-            previous_answer = db.query(Message).filter(Message.conversation_id == conversation.id, Message.sender == "assistant")
+            previous_answer = db.query(Message).filter(
+                Message.conversation_id == conversation.id, Message.sender == AIMessageSender.ASSISTANT
+            )
             previous_answer = previous_answer.order_by(Message.created_at.desc()).first()
             language = previous_answer.answer.get("language", "en") if previous_answer and previous_answer.answer else "en"
             conversation.title = conversation.title if history else payload.message[:80]
@@ -136,9 +146,10 @@ class ConversationRepository:
             if row.lease_token != str(turn_id):
                 raise HTTPException(409, "This reply has expired. Please retry.")
             turn = db.get(Turn, turn_id)
-            turn.status = "complete"
+            turn.status = AITurnStatus.COMPLETE
             turn.tool_metadata = dict(turn.tool_metadata, plan=plan.model_dump(mode="json"))
-            message = Message(conversation_id=row.id, turn_id=turn.id, sender="assistant", content=answer.reply,
+            message = Message(conversation_id=row.id, turn_id=turn.id,
+                              sender=AIMessageSender.ASSISTANT, content=answer.reply,
                               answer=answer.model_dump(mode="json"))
             db.add(message)
             row.updated_at = now()
@@ -152,7 +163,9 @@ class ConversationRepository:
                                                Conversation.lease_token == str(turn_id)).first()
             if row:
                 turn = db.get(Turn, turn_id)
-                turn.status = "cancelled" if code == "cancelled" else "failed"
+                turn.status = (
+                    AITurnStatus.CANCELLED if code == "cancelled" else AITurnStatus.FAILED
+                )
                 turn.error_code = code
                 row.lease_token, row.lease_until = None, None
                 db.commit()

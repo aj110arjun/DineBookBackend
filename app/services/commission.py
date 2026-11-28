@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.models.revenue import PlatformCommission, PlatformCommissionPayout, PlatformRevenueSettings
 from app.models.user import User, UserRole
-from app.models.wallet import WalletAccount, WalletTransaction
+from app.models.wallet import WalletAccount, WalletTransaction, WalletTransactionType
 from app.services.notifications import notify_wallet_transaction
 
 
@@ -61,7 +61,7 @@ def record_wallet_entry(db: Session, account: WalletAccount, amount: Decimal,
         return
     account.balance = money(account.balance) + amount
     transaction = WalletTransaction(user_id=account.user_id, amount=amount,
-        transaction_type="CREDIT" if amount > 0 else "DEBIT",
+        transaction_type=WalletTransactionType.CREDIT if amount > 0 else WalletTransactionType.DEBIT,
         description=description, reference=reference)
     db.add(transaction)
     notify_wallet_transaction(db, transaction)
@@ -107,5 +107,9 @@ def reverse_payment_commission(db: Session, record: PlatformCommission) -> None:
             "Commission reversal for customer refund", reference)
         record_wallet_entry(db, accounts[record.manager_id], amount,
             "Commission returned for customer refund", reference)
+    else:
+        admin = recipient_admin(db)
+        if admin is not None:
+            locked_wallets(db, [record.manager_id, admin.id])
     record.refunded_at = datetime.now(timezone.utc)
     db.flush()

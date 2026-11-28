@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.models.customer_ai import AIMessageSender
+
 Language = Literal["auto", "en", "ml", "hi"]
 Action = Literal["faq", "reservations", "orders", "wallet", "payments", "refunds", "restaurants", "restaurant", "hours", "availability", "offers", "support"]
 
@@ -95,7 +97,7 @@ class AIConversationView(StrictModel):
 
 class AIMessageView(StrictModel):
     id: uuid.UUID
-    sender: Literal["user", "assistant"]
+    sender: AIMessageSender
     content: str
     created_at: datetime
     answer: AIAnswer | None = None

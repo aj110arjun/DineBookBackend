@@ -4,7 +4,7 @@ import importlib.util
 import os
 import unittest
 import uuid
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -31,6 +31,7 @@ from app.routers.restaurants.reservations import (
     cancel_reservation,
     create_reservation,
     get_my_reservation,
+    reservation_booking_eligibility,
     verify_reservation_payment,
 )
 from app.services.reservation_invoice_pdf import build_reservation_invoice_pdf
@@ -104,6 +105,51 @@ class ReservationPricingTests(unittest.TestCase):
         self.assertEqual(self.db.get(WalletAccount, self.customer.id).balance, Decimal("5000.00"))
         self.assertEqual(self.db.query(WalletTransaction).count(), 0)
         self.assertEqual(self.db.query(Reservation).count(), 1)  # Only the original fixture.
+
+    def test_recent_no_show_blocks_new_reservations_for_thirty_minutes(self):
+        no_show_at = datetime.now(timezone.utc) - timedelta(minutes=29)
+        self.db.add(Reservation(
+            user_id=self.customer.id,
+            restaurant_id=self.restaurant.id,
+            reservation_date=self.day - timedelta(days=1),
+            start_time=time(12),
+            end_time=time(13),
+            number_of_guests=2,
+            status="NO_SHOW",
+            fee_amount=Decimal("250.00"),
+            no_show_at=no_show_at,
+        ))
+        self.db.commit()
+
+        eligibility = reservation_booking_eligibility(self.customer, self.db)
+        self.assertFalse(eligibility["can_reserve"])
+        self.assertIsNotNone(eligibility["retry_at"])
+
+        with self.assertRaises(HTTPException) as caught:
+            self.book(90)
+
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertIn("30 minutes after a no-show", caught.exception.detail)
+        self.assertEqual(self.db.query(Reservation).count(), 2)
+
+    def test_expired_no_show_cooldown_allows_new_reservations(self):
+        self.db.add(Reservation(
+            user_id=self.customer.id,
+            restaurant_id=self.restaurant.id,
+            reservation_date=self.day - timedelta(days=1),
+            start_time=time(12),
+            end_time=time(13),
+            number_of_guests=2,
+            status="NO_SHOW",
+            fee_amount=Decimal("250.00"),
+            no_show_at=datetime.now(timezone.utc) - timedelta(minutes=31),
+        ))
+        self.db.commit()
+
+        result = self.book(90)
+
+        self.assertEqual(result["status"], "CONFIRMED")
+        self.assertEqual(self.db.query(Reservation).count(), 3)
 
     def test_wallet_debit_and_refund_use_booked_multitable_price(self):
         other = self.add_table("A2", "200.00", "75.50")

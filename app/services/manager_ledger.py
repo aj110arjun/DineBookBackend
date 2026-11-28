@@ -5,6 +5,7 @@ from decimal import Decimal
 from fastapi import HTTPException
 from sqlalchemy import func, literal, select, union_all
 
+from app.models.payment_values import LedgerEntryType, PaymentSource
 from app.models.revenue import PlatformCommission
 from app.schemas.manager_ledger import LedgerReport
 from app.services.manager_dashboard import PAYMENT_SOURCES, utc_bounds
@@ -17,7 +18,11 @@ def money(value):
 
 
 def ledger_reference(source_type, source_id):
-    prefix = {"FOOD_ORDER": "ORD", "RESERVATION_FEE": "RES", "PREORDER": "RES"}.get(source_type)
+    prefix = {
+        PaymentSource.FOOD_ORDER.value: "ORD",
+        PaymentSource.RESERVATION_FEE.value: "RES",
+        PaymentSource.PREORDER.value: "RES",
+    }.get(source_type)
     return f"{prefix}-{str(source_id).replace('-', '')[:8].upper()}" if prefix else str(source_id)
 
 
@@ -25,11 +30,11 @@ def ledger_report(db, restaurant, params, *, export=False, now=None):
     pc = PlatformCommission
     scope = (pc.restaurant_id == restaurant.id, pc.source_type.in_(PAYMENT_SOURCES))
     captures = select(pc.id.label("record_id"), pc.source_id.label("reference"), pc.source_type,
-        pc.occurred_at.label("at"), literal("COLLECTION").label("kind"),
+        pc.occurred_at.label("at"), literal(LedgerEntryType.COLLECTION.value).label("kind"),
         pc.gross_amount.label("collected"), (pc.gross_amount * 0).label("refunded"),
         pc.commission_amount.label("commission"), (pc.gross_amount - pc.commission_amount).label("net")).where(*scope)
     reversals = select(pc.id, pc.source_id, pc.source_type, pc.refunded_at,
-        literal("REFUND"), pc.gross_amount * 0, pc.gross_amount,
+        literal(LedgerEntryType.REFUND.value), pc.gross_amount * 0, pc.gross_amount,
         -pc.commission_amount, -pc.gross_amount + pc.commission_amount).where(*scope, pc.refunded_at.is_not(None))
     events = union_all(captures, reversals).subquery()
     low, high = utc_bounds(params.start_date, params.end_date)

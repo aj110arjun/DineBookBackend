@@ -8,6 +8,15 @@ from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.models.orders import FoodOrder
+from app.models.payment_values import (
+    PaymentMethod,
+    PaymentSource,
+    PaymentStatus,
+    RefundStatus,
+    TransactionFilterType,
+    WalletEntryStatus,
+)
+from app.models.wallet import WalletTransactionType
 from app.models.reservation import Reservation
 from app.models.restaurant import Restaurant
 from app.models.user import User
@@ -18,9 +27,9 @@ router = APIRouter(prefix="/api/customer", tags=["customer transactions"])
 
 
 def transaction_status(value: WalletTransaction) -> str:
-    if value.transaction_type == "REFUND":
-        return "REFUNDED"
-    return "CREDITED" if value.amount > 0 else "DEBITED"
+    if value.transaction_type == WalletTransactionType.REFUND:
+        return WalletEntryStatus.REFUNDED.value
+    return WalletEntryStatus.CREDITED.value if value.amount > 0 else WalletEntryStatus.DEBITED.value
 
 
 @router.get("/transactions")
@@ -43,7 +52,7 @@ def customer_transactions(
 
     reservation_rows = select(
         cast(Reservation.id, String).label("id"),
-        literal("RESERVATION_FEE").label("transaction_type"),
+        literal(PaymentSource.RESERVATION_FEE).label("transaction_type"),
         literal("Reservation fee").label("description"),
         Reservation.fee_amount.label("amount"),
         Reservation.payment_method.label("payment_method"),
@@ -57,7 +66,7 @@ def customer_transactions(
 
     order_rows = select(
         cast(FoodOrder.id, String).label("id"),
-        literal("FOOD_ORDER").label("transaction_type"),
+        literal(PaymentSource.FOOD_ORDER).label("transaction_type"),
         literal("Food order payment").label("description"),
         FoodOrder.total.label("amount"),
         FoodOrder.payment_method.label("payment_method"),
@@ -71,14 +80,14 @@ def customer_transactions(
 
     wallet_rows = select(
         cast(WalletTransaction.id, String).label("id"),
-        literal("WALLET").label("transaction_type"),
+        literal(TransactionFilterType.WALLET.value).label("transaction_type"),
         WalletTransaction.description.label("description"),
         func.abs(WalletTransaction.amount).label("amount"),
         literal("DINEBOOK_WALLET").label("payment_method"),
         case(
-            (WalletTransaction.transaction_type == "REFUND", "REFUNDED"),
-            (WalletTransaction.amount > 0, "CREDITED"),
-            else_="DEBITED",
+            (WalletTransaction.transaction_type == WalletTransactionType.REFUND, PaymentStatus.REFUNDED),
+            (WalletTransaction.amount > 0, WalletEntryStatus.CREDITED.value),
+            else_=WalletEntryStatus.DEBITED.value,
         ).label("status"),
         WalletTransaction.created_at.label("created_at"),
         WalletTransaction.reference.label("provider_reference"),
@@ -89,17 +98,17 @@ def customer_transactions(
 
     failed_topup_rows = select(
         cast(WalletTopUp.id, String).label("id"),
-        literal("WALLET").label("transaction_type"),
+        literal(TransactionFilterType.WALLET.value).label("transaction_type"),
         literal("Wallet top-up payment failed").label("description"),
         WalletTopUp.amount.label("amount"),
-        literal("RAZORPAY").label("payment_method"),
-        literal("FAILED").label("status"),
+        literal(PaymentMethod.RAZORPAY.value).label("payment_method"),
+        literal(PaymentStatus.FAILED).label("status"),
         WalletTopUp.created_at.label("created_at"),
         WalletTopUp.razorpay_payment_id.label("provider_reference"),
         WalletTopUp.razorpay_order_id.label("provider_order_reference"),
         cast(None, String).label("related_id"),
         cast(None, String).label("restaurant_name"),
-    ).where(WalletTopUp.user_id == customer.id, WalletTopUp.status == "FAILED")
+    ).where(WalletTopUp.user_id == customer.id, WalletTopUp.status == PaymentStatus.FAILED)
 
     combined = union_all(reservation_rows, order_rows, wallet_rows, failed_topup_rows).subquery("customer_transactions")
     query = select(combined)
@@ -107,10 +116,16 @@ def customer_transactions(
     conditions = []
     if transaction_type:
         conditions.append(combined.c.transaction_type == transaction_type)
-    if wallet_direction == "CREDIT":
-        conditions.append(combined.c.status.in_(["CREDITED", "REFUNDED"]))
-    elif wallet_direction == "DEBIT":
-        conditions.append(combined.c.status.in_(["DEBITED", "FAILED"]))
+    if wallet_direction == WalletTransactionType.CREDIT:
+        conditions.append(combined.c.status.in_([
+            WalletEntryStatus.CREDITED.value,
+            WalletEntryStatus.REFUNDED.value,
+        ]))
+    elif wallet_direction == WalletTransactionType.DEBIT:
+        conditions.append(combined.c.status.in_([
+            WalletEntryStatus.DEBITED.value,
+            WalletEntryStatus.FAILED.value,
+        ]))
     if status:
         conditions.append(func.upper(combined.c.status) == status.strip().upper())
     if date_from:
@@ -150,7 +165,7 @@ def customer_transaction_details(
     db: Session = Depends(get_db),
 ) -> dict:
     transaction_type = transaction_type.replace("-", "_").upper()
-    if transaction_type == "RESERVATION_FEE":
+    if transaction_type == TransactionFilterType.RESERVATION_FEE:
         item = db.query(Reservation).filter(Reservation.id == transaction_id, Reservation.user_id == customer.id).first()
         if item is None:
             raise HTTPException(status_code=404, detail="Transaction not found.")
@@ -164,10 +179,10 @@ def customer_transaction_details(
             "restaurant_location": ", ".join(part for part in (restaurant.city, restaurant.state) if part) if restaurant else None,
             "restaurant_address": restaurant.address if restaurant else None, "restaurant_email": restaurant.email if restaurant else None,
             "restaurant_phone": restaurant.phone if restaurant else None, "customer_name": customer.name, "customer_email": customer.email,
-            "currency": "INR", "refund_status": "REFUNDED" if item.payment_status == "REFUNDED" else "NONE",
+            "currency": "INR", "refund_status": PaymentStatus.REFUNDED if item.payment_status == PaymentStatus.REFUNDED else RefundStatus.NONE,
         }
 
-    if transaction_type == "FOOD_ORDER":
+    if transaction_type == TransactionFilterType.FOOD_ORDER:
         item = db.query(FoodOrder).filter(FoodOrder.id == transaction_id, FoodOrder.customer_id == customer.id).first()
         if item is None:
             raise HTTPException(status_code=404, detail="Transaction not found.")
@@ -184,15 +199,15 @@ def customer_transaction_details(
             "restaurant_location": ", ".join(part for part in (restaurant.city, restaurant.state) if part) if restaurant else None,
             "restaurant_address": restaurant.address if restaurant else None, "restaurant_email": restaurant.email if restaurant else None,
             "restaurant_phone": restaurant.phone if restaurant else None, "customer_name": customer.name, "customer_email": customer.email,
-            "currency": "INR", "refund_status": "REFUNDED" if item.payment_status == "REFUNDED" else "NONE",
+            "currency": "INR", "refund_status": PaymentStatus.REFUNDED if item.payment_status == PaymentStatus.REFUNDED else RefundStatus.NONE,
         }
 
-    if transaction_type == "WALLET":
+    if transaction_type == TransactionFilterType.WALLET:
         item = db.query(WalletTransaction).filter(WalletTransaction.id == transaction_id, WalletTransaction.user_id == customer.id).first()
         if item is None:
             topup = db.query(WalletTopUp).filter(
                 WalletTopUp.id == transaction_id, WalletTopUp.user_id == customer.id,
-                WalletTopUp.status == "FAILED",
+                WalletTopUp.status == PaymentStatus.FAILED,
             ).first()
             if topup is None:
                 raise HTTPException(status_code=404, detail="Transaction not found.")
@@ -200,10 +215,10 @@ def customer_transaction_details(
                 "id": str(topup.id), "transaction_type": transaction_type,
                 "description": "Wallet top-up payment failed", "amount": float(topup.amount),
                 "subtotal": float(topup.amount), "discount_amount": 0, "payment_method": "RAZORPAY",
-                "status": "FAILED", "created_at": topup.created_at.isoformat() if topup.created_at else None,
+                "status": PaymentStatus.FAILED, "created_at": topup.created_at.isoformat() if topup.created_at else None,
                 "provider_reference": topup.razorpay_payment_id, "provider_order_reference": topup.razorpay_order_id,
                 "related_id": None, "customer_name": customer.name, "customer_email": customer.email,
-                "restaurant_name": "DineBook", "currency": "INR", "refund_status": "NONE",
+                "restaurant_name": "DineBook", "currency": "INR", "refund_status": RefundStatus.NONE,
                 "category": "wallet_top_up",
             }
         topup = db.query(WalletTopUp).filter(WalletTopUp.user_id == customer.id, WalletTopUp.razorpay_payment_id == item.reference).first()
@@ -216,7 +231,7 @@ def customer_transaction_details(
             "provider_order_reference": topup.razorpay_order_id if topup else None,
             "related_id": str(item.reservation_id) if item.reservation_id else None,
             "customer_name": customer.name, "customer_email": customer.email, "restaurant_name": "DineBook",
-            "currency": "INR", "refund_status": "REFUNDED" if transaction_status(item) == "REFUNDED" else "NONE",
+            "currency": "INR", "refund_status": PaymentStatus.REFUNDED if transaction_status(item) == PaymentStatus.REFUNDED else RefundStatus.NONE,
             "category": "wallet_top_up" if topup else "wallet",
         }
 

@@ -6,6 +6,7 @@ from sqlalchemy import String, cast, func, literal, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
+from app.models.payment_values import PaymentSource, PaymentStatus, RefundStatus
 from app.models.reservation import Reservation
 from app.models.orders import FoodOrder
 from app.models.restaurant import Restaurant
@@ -22,9 +23,9 @@ def payment_view(item: Reservation) -> dict:
     return {
         "id": str(item.id), "transaction_id": str(item.id),
         "reservation_id": str(item.id), "restaurant_id": str(item.restaurant_id),
-        "type": "RESERVATION_FEE", "amount": float(item.fee_amount), "currency": "INR",
+        "type": PaymentSource.RESERVATION_FEE, "amount": float(item.fee_amount), "currency": "INR",
         "payment_method": item.payment_method, "status": item.payment_status,
-        "refund_status": "REFUNDED" if item.payment_status == "REFUNDED" else "NONE",
+        "refund_status": RefundStatus.REFUNDED if item.payment_status == PaymentStatus.REFUNDED else RefundStatus.NONE,
         "razorpay_order_id": item.razorpay_order_id,
         "razorpay_payment_id": item.razorpay_payment_id,
         "created_at": item.created_at.isoformat() if item.created_at else None,
@@ -41,7 +42,7 @@ def order_payment_view(item: FoodOrder) -> dict:
         "restaurant_id": str(item.restaurant_id), "type": "ORDER_PAYMENT",
         "amount": float(item.total), "currency": "INR", "payment_method": item.payment_method,
         "status": item.payment_status,
-        "refund_status": "REFUNDED" if item.payment_status == "REFUNDED" else "NONE",
+        "refund_status": RefundStatus.REFUNDED if item.payment_status == PaymentStatus.REFUNDED else RefundStatus.NONE,
         "razorpay_order_id": None, "razorpay_payment_id": None,
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
@@ -55,7 +56,7 @@ def list_payments(db: Session, restaurant_id: uuid.UUID | None, *, q: str | None
     if date_from and date_to and date_from > date_to:
         raise HTTPException(status_code=422, detail="Start date must be on or before end date.")
     reservation_rows = select(
-        cast(Reservation.id, String).label("id"), literal("RESERVATION_FEE").label("type"),
+        cast(Reservation.id, String).label("id"), literal(PaymentSource.RESERVATION_FEE.value).label("type"),
         Reservation.fee_amount.label("amount"), Reservation.payment_method.label("payment_method"),
         Reservation.payment_status.label("status"), Reservation.razorpay_order_id.label("razorpay_order_id"),
         Reservation.razorpay_payment_id.label("razorpay_payment_id"), Reservation.created_at.label("created_at"),
@@ -91,10 +92,10 @@ def list_payments(db: Session, restaurant_id: uuid.UUID | None, *, q: str | None
         query = query.filter(records.c.type == transaction_type)
     if payment_method:
         query = query.filter(records.c.payment_method == payment_method)
-    if refund_status == "REFUNDED":
-        query = query.filter(records.c.status == "REFUNDED")
-    elif refund_status == "NONE":
-        query = query.filter(records.c.status != "REFUNDED")
+    if refund_status == RefundStatus.REFUNDED:
+        query = query.filter(records.c.status == PaymentStatus.REFUNDED.value)
+    elif refund_status == RefundStatus.NONE:
+        query = query.filter(records.c.status != PaymentStatus.REFUNDED.value)
     if date_from:
         query = query.filter(records.c.created_at >= datetime.combine(date_from, time.min, tzinfo=timezone.utc))
     if date_to:
@@ -106,7 +107,7 @@ def list_payments(db: Session, restaurant_id: uuid.UUID | None, *, q: str | None
         ordering = name.asc() if sort == "restaurant-asc" else name.desc()
     items = query.order_by(ordering, records.c.created_at.desc(), records.c.type.asc(), records.c.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
     return {"transactions": [{**dict(item._mapping), "amount": float(item.amount), "currency": "INR",
-            "refund_status": "REFUNDED" if item.status == "REFUNDED" else "NONE",
+            "refund_status": RefundStatus.REFUNDED if item.status == PaymentStatus.REFUNDED else RefundStatus.NONE,
             "transaction_id": item.id} for item in items], "total": total,
             "page": page, "page_size": page_size}
 

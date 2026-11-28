@@ -1,13 +1,24 @@
 """Kitchen-only projections; customer identities and payment data are excluded."""
 from datetime import date, datetime
+from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.models.orders import OrderStatus
+
+
+class KitchenOrderFilter(str, Enum):
+    ACTIVE = "ACTIVE"
+    PLACED = OrderStatus.PLACED.value
+    ACCEPTED = OrderStatus.ACCEPTED.value
+    PREPARING = OrderStatus.PREPARING.value
+    READY = OrderStatus.READY.value
+
 
 class ChefDashboardQuery(BaseModel):
     period: Literal["today", "last7", "last30"] = "today"
-    status: Literal["ACTIVE", "PLACED", "ACCEPTED", "PREPARING", "READY"] = "ACTIVE"
+    status: KitchenOrderFilter = KitchenOrderFilter.ACTIVE
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=8, ge=1, le=50)
 
